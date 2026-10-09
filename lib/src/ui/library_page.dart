@@ -1,0 +1,286 @@
+import 'package:flutter/material.dart';
+
+import '../input/stylus_input.dart';
+import '../storage/note_document.dart';
+import '../storage/vault.dart';
+import 'note_page.dart';
+import 'title_dialog.dart';
+
+class LibraryPage extends StatefulWidget {
+  const LibraryPage({required this.vault, super.key});
+
+  final NoteLibrary vault;
+
+  @override
+  State<LibraryPage> createState() => _LibraryPageState();
+}
+
+class _LibraryPageState extends State<LibraryPage> {
+  late Future<List<NoteSummary>> _notes;
+  NoteSummary? _hovered;
+  Offset? _hoverPosition;
+  Offset? _pressPosition;
+  var _menuOpen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _notes = widget.vault.listSummaries();
+    StylusInput.addHandler(_onSqueeze);
+  }
+
+  @override
+  void dispose() {
+    StylusInput.removeHandler(_onSqueeze);
+    super.dispose();
+  }
+
+  void _reload() {
+    setState(() {
+      _notes = widget.vault.listSummaries();
+    });
+  }
+
+  void _onSqueeze(Offset? position) {
+    final note = _hovered;
+    if (note == null || _menuOpen || !mounted) {
+      return;
+    }
+    _showMenu(note, position ?? _hoverPosition ?? Offset.zero);
+  }
+
+  Future<void> _showMenu(NoteSummary note, Offset global) async {
+    if (_menuOpen) {
+      return;
+    }
+    _menuOpen = true;
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final action = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(global.dx, global.dy, 0, 0),
+        Offset.zero & overlay.size,
+      ),
+      items: const [
+        PopupMenuItem(value: 'rename', child: Text('重命名')),
+        PopupMenuItem(value: 'delete', child: Text('删除')),
+      ],
+    );
+    _menuOpen = false;
+    if (!mounted || action == null) {
+      return;
+    }
+    if (action == 'rename') {
+      await _rename(note);
+    } else if (action == 'delete') {
+      await _delete(note);
+    }
+  }
+
+  Future<void> _rename(NoteSummary note) async {
+    final title = await askTitle(context, heading: '重命名', initial: note.title);
+    if (title == null || !mounted) {
+      return;
+    }
+    try {
+      await widget.vault.renameNote(
+        OpenNote(
+          directoryName: note.directoryName,
+          manifest: note.manifest,
+          pages: const [],
+        ),
+        title,
+      );
+      _reload();
+    } on NoteNameTaken catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('$error')));
+    }
+  }
+
+  Future<void> _delete(NoteSummary note) async {
+    final ok = await askConfirm(
+      context,
+      heading: '删除笔记',
+      body: '「${note.title}」会从笔记库里去掉。',
+    );
+    if (!ok || !mounted) {
+      return;
+    }
+    await widget.vault.deleteNote(
+      OpenNote(
+        directoryName: note.directoryName,
+        manifest: note.manifest,
+        pages: const [],
+      ),
+    );
+    if (_hovered?.directoryName == note.directoryName) {
+      _hovered = null;
+    }
+    _reload();
+  }
+
+  Future<void> _open(NoteSummary note) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => _NoteGate(
+          vault: widget.vault,
+          load: widget.vault.openNote(note.directoryName),
+        ),
+      ),
+    );
+    _reload();
+  }
+
+  Future<void> _create() async {
+    final title = await askTitle(context, heading: '新建笔记', initial: '');
+    if (title == null || !mounted) {
+      return;
+    }
+    try {
+      final note = await widget.vault.createNote(title);
+      if (!mounted) {
+        return;
+      }
+      await Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (context) => _NoteGate(
+            vault: widget.vault,
+            load: Future<OpenNote>.value(note),
+          ),
+        ),
+      );
+      _reload();
+    } on NoteNameTaken catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('$error')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('YetAnotherPage')),
+      body: FutureBuilder<List<NoteSummary>>(
+        future: _notes,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState != ConnectionState.done) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (snapshot.hasError) {
+            return Center(child: Text('无法读取笔记库：${snapshot.error}'));
+          }
+          final notes = snapshot.data ?? const <NoteSummary>[];
+          if (notes.isEmpty) {
+            return const Center(child: Text('还没有笔记'));
+          }
+          return ListView.builder(
+            itemCount: notes.length,
+            itemBuilder: (context, index) {
+              final note = notes[index];
+              return MouseRegion(
+                onHover: (event) {
+                  _hovered = note;
+                  _hoverPosition = event.position;
+                },
+                onExit: (_) {
+                  if (_hovered?.directoryName == note.directoryName) {
+                    _hovered = null;
+                  }
+                },
+                child: Listener(
+                  onPointerDown: (event) => _pressPosition = event.position,
+                  child: ListTile(
+                    title: Text(note.title),
+                    subtitle: Text(note.directoryName),
+                    onTap: () => _open(note),
+                    onLongPress: () => _showMenu(
+                      note,
+                      _pressPosition ?? _hoverPosition ?? Offset.zero,
+                    ),
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _create,
+        label: const Text('新建笔记'),
+        icon: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+
+class _NoteGate extends StatefulWidget {
+  const _NoteGate({required this.vault, required this.load});
+
+  final NoteLibrary vault;
+  final Future<OpenNote> load;
+
+  @override
+  State<_NoteGate> createState() => _NoteGateState();
+}
+
+class _NoteGateState extends State<_NoteGate> {
+  OpenNote? _note;
+  Object? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.load.then(
+      (note) {
+        if (mounted) {
+          setState(() => _note = note);
+        }
+      },
+      onError: (Object error) {
+        if (mounted) {
+          setState(() => _error = error);
+        }
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final note = _note;
+    if (note != null) {
+      return NotePage(vault: widget.vault, note: note);
+    }
+    final scheme = Theme.of(context).colorScheme;
+    return Scaffold(
+      body: Center(
+        child: _error == null
+            ? Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 42,
+                    height: 42,
+                    child: CircularProgressIndicator(
+                      color: scheme.primary,
+                      strokeWidth: 3,
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Text(
+                    '正在打开笔记',
+                    style: TextStyle(color: scheme.onSurfaceVariant),
+                  ),
+                ],
+              )
+            : Text('无法打开笔记：$_error'),
+      ),
+    );
+  }
+}
