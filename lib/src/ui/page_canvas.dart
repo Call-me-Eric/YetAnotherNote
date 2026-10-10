@@ -30,22 +30,28 @@ class InkPatch {
 }
 
 final _idleSelection = ValueNotifier<SelectionPreview?>(null);
+final _idleLasso = ValueNotifier<LassoDrag?>(null);
+
+class LassoDrag {
+  const LassoDrag({required this.points, this.rect});
+
+  final List<Offset> points;
+  final Rect? rect;
+}
 
 class SelectionPreview {
   const SelectionPreview({
     required this.strokes,
     required this.bounds,
     this.outline = const [],
-    this.image,
-    this.imageRect,
+    this.picture,
     this.transform,
   });
 
   final List<StrokeObject> strokes;
   final Rect bounds;
   final List<Offset> outline;
-  final ui.Image? image;
-  final Rect? imageRect;
+  final ui.Picture? picture;
   final Float64List? transform;
 }
 
@@ -99,6 +105,7 @@ class PageCanvas extends StatelessWidget {
     this.lassoPoints = const [],
     this.lassoOutline = const [],
     this.lassoRect,
+    required this.lassoLive,
     this.selectionBounds,
     this.selectionInk = const [],
     this.onLassoStart,
@@ -160,16 +167,18 @@ class PageCanvas extends StatelessWidget {
   final List<Offset> lassoPoints;
   final List<Offset> lassoOutline;
   final Rect? lassoRect;
+  final ValueListenable<LassoDrag?> lassoLive;
   final Rect? selectionBounds;
   final List<StrokeObject> selectionInk;
   final void Function(String pageId, Offset point)? onLassoStart;
   final void Function(String pageId, Offset point)? onLassoMove;
   final void Function(String pageId, Offset point)? onLassoEnd;
-  final void Function(Offset delta)? onSelectionMove;
+  final void Function(Offset pagePoint)? onSelectionMove;
   final VoidCallback? onSelectionMoveEnd;
-  final void Function(SelectionHandle handle, Offset delta)? onSelectionScale;
+  final void Function(SelectionHandle handle, Offset pagePoint)?
+  onSelectionScale;
   final VoidCallback? onSelectionScaleEnd;
-  final void Function(Offset pointer)? onSelectionRotate;
+  final void Function(Offset pagePoint)? onSelectionRotate;
   final VoidCallback? onSelectionRotateEnd;
   final VoidCallback? onSelectionMenu;
   final VoidCallback? onSelectionClear;
@@ -248,6 +257,9 @@ class PageCanvas extends StatelessWidget {
                     : const [],
                 selectionHaptic: selectionHaptic,
                 lassoRect: pages[index].id == selectedPageId ? lassoRect : null,
+                lassoLive: pages[index].id == selectedPageId
+                    ? lassoLive
+                    : _idleLasso,
                 selectionBounds: pages[index].id == selectedPageId
                     ? selectionBounds
                     : null,
@@ -318,6 +330,7 @@ class _PageSheet extends StatefulWidget {
     this.lassoPoints = const [],
     this.lassoOutline = const [],
     this.lassoRect,
+    required this.lassoLive,
     this.selectionBounds,
     this.selectionInk = const [],
     this.onLassoStart,
@@ -375,16 +388,18 @@ class _PageSheet extends StatefulWidget {
   final List<Offset> lassoPoints;
   final List<Offset> lassoOutline;
   final Rect? lassoRect;
+  final ValueListenable<LassoDrag?> lassoLive;
   final Rect? selectionBounds;
   final List<StrokeObject> selectionInk;
   final void Function(String pageId, Offset point)? onLassoStart;
   final void Function(String pageId, Offset point)? onLassoMove;
   final void Function(String pageId, Offset point)? onLassoEnd;
-  final void Function(Offset delta)? onSelectionMove;
+  final void Function(Offset pagePoint)? onSelectionMove;
   final VoidCallback? onSelectionMoveEnd;
-  final void Function(SelectionHandle handle, Offset delta)? onSelectionScale;
+  final void Function(SelectionHandle handle, Offset pagePoint)?
+  onSelectionScale;
   final VoidCallback? onSelectionScaleEnd;
-  final void Function(Offset pointer)? onSelectionRotate;
+  final void Function(Offset pagePoint)? onSelectionRotate;
   final VoidCallback? onSelectionRotateEnd;
   final VoidCallback? onSelectionMenu;
   final VoidCallback? onSelectionClear;
@@ -645,13 +660,20 @@ class _PageSheetState extends State<_PageSheet> {
                       ),
                     ),
                   Positioned.fill(
-                    child: IgnorePointer(
-                      child: CustomPaint(
-                        painter: _LassoPainter(
-                          points: widget.lassoPoints,
-                          rect: widget.lassoRect,
-                        ),
-                      ),
+                    child: ValueListenableBuilder<LassoDrag?>(
+                      valueListenable: widget.lassoLive,
+                      builder: (context, drag, _) {
+                        final points = drag?.points ?? const <Offset>[];
+                        final rect = drag?.rect;
+                        if (points.length < 2 && (rect == null || rect.isEmpty)) {
+                          return const SizedBox.shrink();
+                        }
+                        return IgnorePointer(
+                          child: CustomPaint(
+                            painter: _LassoPainter(points: points, rect: rect),
+                          ),
+                        );
+                      },
                     ),
                   ),
                   Positioned.fill(
@@ -660,7 +682,11 @@ class _PageSheetState extends State<_PageSheet> {
                       builder: (context, live, _) {
                         final ink = live?.strokes ?? const <StrokeObject>[];
                         final outline = live?.outline ?? widget.lassoOutline;
-                        if (ink.isEmpty && outline.length < 2) {
+                        final hasMark =
+                            ink.isNotEmpty ||
+                            outline.length >= 2 ||
+                            live?.picture != null;
+                        if (!hasMark) {
                           return const SizedBox.shrink();
                         }
                         return IgnorePointer(
@@ -668,8 +694,7 @@ class _PageSheetState extends State<_PageSheet> {
                             painter: _SelectionMarkPainter(
                               strokes: ink,
                               outline: outline,
-                              image: live?.image,
-                              imageRect: live?.imageRect,
+                              picture: live?.picture,
                               transform: live?.transform,
                             ),
                           ),
@@ -705,14 +730,16 @@ class _PageSheetState extends State<_PageSheet> {
                         return SelectionFrame(
                           key: const ValueKey('selection-frame'),
                           bounds: bounds,
-                          onMove: (delta) => widget.onSelectionMove?.call(delta),
+                          onMove: (point) =>
+                              widget.onSelectionMove?.call(point),
                           onMoveEnd: () => widget.onSelectionMoveEnd?.call(),
-                          onScale: (handle, delta) =>
-                              widget.onSelectionScale?.call(handle, delta),
+                          onScale: (handle, point) =>
+                              widget.onSelectionScale?.call(handle, point),
                           onScaleEnd: () => widget.onSelectionScaleEnd?.call(),
-                          onRotate: (pointer) =>
-                              widget.onSelectionRotate?.call(pointer),
-                          onRotateEnd: () => widget.onSelectionRotateEnd?.call(),
+                          onRotate: (point) =>
+                              widget.onSelectionRotate?.call(point),
+                          onRotateEnd: () =>
+                              widget.onSelectionRotateEnd?.call(),
                           onMenu: () => widget.onSelectionMenu?.call(),
                         );
                       },
@@ -1043,15 +1070,13 @@ class _SelectionMarkPainter extends CustomPainter {
   const _SelectionMarkPainter({
     required this.strokes,
     required this.outline,
-    this.image,
-    this.imageRect,
+    this.picture,
     this.transform,
   });
 
   final List<StrokeObject> strokes;
   final List<Offset> outline;
-  final ui.Image? image;
-  final Rect? imageRect;
+  final ui.Picture? picture;
   final Float64List? transform;
 
   @override
@@ -1061,15 +1086,9 @@ class _SelectionMarkPainter extends CustomPainter {
       canvas.save();
       canvas.transform(matrix);
     }
-    final shot = image;
-    final rect = imageRect;
-    if (shot != null && rect != null) {
-      canvas.drawImageRect(
-        shot,
-        Rect.fromLTWH(0, 0, shot.width.toDouble(), shot.height.toDouble()),
-        rect,
-        Paint()..filterQuality = FilterQuality.medium,
-      );
+    final recorded = picture;
+    if (recorded != null) {
+      canvas.drawPicture(recorded);
     } else {
       for (final stroke in strokes) {
         paintStroke(canvas, stroke);
@@ -1089,7 +1108,11 @@ class _SelectionMarkPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _SelectionMarkPainter oldDelegate) => true;
+  bool shouldRepaint(covariant _SelectionMarkPainter oldDelegate) =>
+      oldDelegate.picture != picture ||
+      oldDelegate.transform != transform ||
+      oldDelegate.strokes != strokes ||
+      oldDelegate.outline != outline;
 }
 
 bool _stylusKind(PointerDeviceKind kind) {
@@ -1345,6 +1368,21 @@ class _CommittedInkState extends State<_CommittedInk> {
     _enqueue(patch.bounds, patch.paint, onApplied: patch.onApplied);
   }
 
+  var _paintScheduled = false;
+
+  void _schedulePaint() {
+    if (_paintScheduled) {
+      return;
+    }
+    _paintScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _paintScheduled = false;
+      if (mounted) {
+        setState(() {});
+      }
+    });
+  }
+
   void _syncStrokes(List<StrokeObject> strokes) {
     final ids = {for (final stroke in strokes) stroke.id};
     final added = [
@@ -1352,15 +1390,24 @@ class _CommittedInkState extends State<_CommittedInk> {
         if (!_rasterized.contains(stroke.id)) stroke,
     ];
     final removed = _rasterized.difference(ids);
-    if (_dabbed && removed.isNotEmpty) {
-      final addedIds = [for (final stroke in added) stroke.id];
-      _rasterized
-        ..addAll(addedIds)
-        ..removeAll(removed);
-      _baked
-        ..addAll(addedIds)
-        ..removeAll(removed);
+    if (removed.isEmpty && added.isEmpty) {
+      return;
+    }
+    if (_dabbed && removed.isNotEmpty && added.isEmpty) {
+      _rasterized.removeAll(removed);
+      _baked.removeAll(removed);
       _dabbed = false;
+      return;
+    }
+    if (removed.isNotEmpty || added.length > 1) {
+      _rasterized
+        ..clear()
+        ..addAll(ids);
+      _baked
+        ..clear()
+        ..addAll(ids);
+      _generation++;
+      _repaintTiles(strokes, _generation);
       return;
     }
     for (final stroke in added) {
@@ -1372,26 +1419,87 @@ class _CommittedInkState extends State<_CommittedInk> {
         bakeIds: [stroke.id],
       );
     }
-    if (removed.isNotEmpty) {
-      _rasterized
-        ..clear()
-        ..addAll(ids);
-      _baked.clear();
-      final retiring = Map<String, ui.Image>.of(_tiles);
-      _tiles.clear();
-      _generation++;
-      for (final image in retiring.values) {
-        image.dispose();
+  }
+
+  void _repaintTiles(List<StrokeObject> strokes, int generation) {
+    _chain = _chain.then((_) async {
+      if (!mounted || generation != _generation) {
+        return;
       }
+      final rects = <Rect>[];
+      final seen = <String>{};
       for (final stroke in strokes) {
+        if (stroke.points.isEmpty) {
+          continue;
+        }
         final bounds = _inkBounds(stroke.points).inflate(stroke.baseWidth + 2);
-        _enqueue(
-          bounds,
-          (canvas) => paintStroke(canvas, stroke),
-          bakeIds: [stroke.id],
-        );
+        for (final rect in _tileRects(bounds)) {
+          final key = _tileKey(rect);
+          if (seen.add(key)) {
+            rects.add(rect);
+          }
+        }
       }
-    }
+      final updates = <String, ui.Image>{};
+      for (final rect in rects) {
+        if (!mounted || generation != _generation) {
+          for (final image in updates.values) {
+            image.dispose();
+          }
+          return;
+        }
+        final image = await _renderTile(rect, (canvas) {
+          for (final stroke in strokes) {
+            if (stroke.points.isEmpty) {
+              continue;
+            }
+            final bounds = _inkBounds(
+              stroke.points,
+            ).inflate(stroke.baseWidth + 2);
+            if (bounds.overlaps(rect)) {
+              paintStroke(canvas, stroke);
+            }
+          }
+        }, fresh: true);
+        if (!mounted || generation != _generation) {
+          image.dispose();
+          for (final previous in updates.values) {
+            previous.dispose();
+          }
+          return;
+        }
+        updates[_tileKey(rect)] = image;
+      }
+      if (!mounted || generation != _generation) {
+        for (final image in updates.values) {
+          image.dispose();
+        }
+        return;
+      }
+      final retiring = <ui.Image>[];
+      final nextKeys = updates.keys.toSet();
+      for (final entry in _tiles.entries) {
+        if (!nextKeys.contains(entry.key)) {
+          retiring.add(entry.value);
+        }
+      }
+      for (final key in _tiles.keys.toList()) {
+        if (!nextKeys.contains(key)) {
+          _tiles.remove(key);
+        }
+      }
+      for (final entry in updates.entries) {
+        final previous = _tiles[entry.key];
+        _tiles[entry.key] = entry.value;
+        if (previous != null) {
+          retiring.add(previous);
+        }
+      }
+      _schedulePaint();
+      for (final image in retiring) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => image.dispose());
+      }
+    });
   }
 
   void _enqueue(
@@ -1444,9 +1552,7 @@ class _CommittedInkState extends State<_CommittedInk> {
       }
       _baked.addAll(bakeIds);
       onApplied?.call();
-      if (mounted) {
-        setState(() {});
-      }
+      _schedulePaint();
       for (final image in retiring) {
         WidgetsBinding.instance.addPostFrameCallback((_) => image.dispose());
       }
@@ -1455,14 +1561,15 @@ class _CommittedInkState extends State<_CommittedInk> {
 
   Future<ui.Image> _renderTile(
     Rect rect,
-    void Function(Canvas canvas) paint,
-  ) async {
+    void Function(Canvas canvas) paint, {
+    bool fresh = false,
+  }) async {
     final scale = (_dpr <= 0 ? 1.0 : _dpr) * widget.viewScale;
     final pixelsWide = math.max(1, (rect.width * scale).round());
     final pixelsHigh = math.max(1, (rect.height * scale).round());
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
-    final current = _tiles[_tileKey(rect)];
+    final current = fresh ? null : _tiles[_tileKey(rect)];
     if (current != null) {
       canvas.drawImageRect(
         current,

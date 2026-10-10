@@ -1,13 +1,16 @@
 import 'package:flutter/services.dart';
 
-/// A stylus side control. The hardware gesture differs by platform.
+/// Stylus hardware, as reported by the current platform.
 ///
-/// A platform reports a press with [StylusSideButton.report]. It does not
-/// decide what the app does next. iOS reports an Apple Pencil Pro squeeze.
-/// Another platform reports its own side button the same way.
+/// The app only sees this interface. A platform adapter translates its own
+/// side button, double tap, and haptic into these calls. Platforms without
+/// one of the gestures simply never report it.
 abstract interface class StylusSideButton {
   static const channelName = 'dev.yetanotherpage/stylus';
-  static const reportMethod = 'sideButton';
+  static const sideButtonMethod = 'sideButton';
+  static const doubleTapMethod = 'doubleTap';
+  static const prepareHapticMethod = 'prepareHaptic';
+  static const playHapticMethod = 'playHaptic';
 
   void addListener(StylusSideButtonListener listener);
 
@@ -15,11 +18,23 @@ abstract interface class StylusSideButton {
 
   /// [globalPosition] is the pointer in global coordinates, when known.
   void report(Offset? globalPosition);
+
+  void addDoubleTapListener(VoidCallback listener);
+
+  void removeDoubleTapListener(VoidCallback listener);
+
+  void reportDoubleTap();
+
+  /// Warm the stylus haptic, if this platform has one.
+  void prepareHaptic();
+
+  /// Play a short stylus haptic at [global], if this platform has one.
+  void playHaptic(Offset global);
 }
 
 typedef StylusSideButtonListener = void Function(Offset? globalPosition);
 
-/// Receives [StylusSideButton.reportMethod] from the current platform.
+/// Receives platform stylus events and asks the platform to play haptics.
 class ChannelStylusSideButton implements StylusSideButton {
   final List<StylusSideButtonListener> _listeners = [];
   final List<VoidCallback> _doubleTaps = [];
@@ -28,29 +43,49 @@ class ChannelStylusSideButton implements StylusSideButton {
     const MethodChannel(
       StylusSideButton.channelName,
     ).setMethodCallHandler((call) async {
-      if (call.method == StylusSideButton.reportMethod) {
+      if (call.method == StylusSideButton.sideButtonMethod) {
         report(_position(call.arguments));
         return;
       }
-      if (call.method == 'doubleTap') {
+      if (call.method == StylusSideButton.doubleTapMethod) {
         reportDoubleTap();
       }
     });
   }
 
+  @override
   void addDoubleTapListener(VoidCallback listener) {
     _doubleTaps.add(listener);
   }
 
+  @override
   void removeDoubleTapListener(VoidCallback listener) {
     _doubleTaps.remove(listener);
   }
 
+  @override
   void reportDoubleTap() {
     if (_doubleTaps.isEmpty) {
       return;
     }
     _doubleTaps.last();
+  }
+
+  @override
+  void prepareHaptic() {
+    const MethodChannel(
+      StylusSideButton.channelName,
+    ).invokeMethod<void>(StylusSideButton.prepareHapticMethod).catchError((
+      Object _,
+    ) {});
+  }
+
+  @override
+  void playHaptic(Offset global) {
+    const MethodChannel(StylusSideButton.channelName).invokeMethod<void>(
+      StylusSideButton.playHapticMethod,
+      {'x': global.dx, 'y': global.dy},
+    ).catchError((Object _) {});
   }
 
   @override

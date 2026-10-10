@@ -13,6 +13,7 @@ import '../ink/selection.dart';
 import '../ink/stroke.dart';
 import '../ink/text_box.dart';
 import '../input/finger.dart';
+import '../input/stylus_feedback.dart';
 import '../input/stylus_preferences.dart';
 import '../input/stylus_side_button.dart';
 import '../storage/note_document.dart';
@@ -89,6 +90,7 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
   var _lassoBarOpen = false;
   String? _lassoPageId;
   List<Offset> _lassoPoints = const [];
+  final ValueNotifier<LassoDrag?> _lassoLive = ValueNotifier(null);
   List<Offset> _lassoOutline = const [];
   List<Offset>? _gestureOutline;
   StylusPreferences _stylus = StylusPreferences.initial;
@@ -103,15 +105,13 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
   List<StrokeObject>? _gestureStrokes;
   List<TextBox>? _gestureTexts;
   var _selectionDirty = false;
-  Offset? _rotateLast;
   final ValueNotifier<SelectionPreview?> _selectionLive = ValueNotifier(null);
   Offset? _gestureCenter;
-  Offset? _rotateOrigin;
+  Offset? _dragStart;
+  SelectionHandle? _scaleHandle;
   Rect? _gestureBounds;
   Matrix4? _gestureMatrix;
-  ui.Image? _gestureImage;
-  Rect? _gestureImageRect;
-  var _gestureEpoch = 0;
+  ui.Picture? _gesturePicture;
   OverlayEntry? _optionsArc;
   Offset? _tip;
   OverlayEntry? _arc;
@@ -160,6 +160,7 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     _optionsArc?.remove();
     _optionsArc = null;
     _selectionLive.dispose();
+    _lassoLive.dispose();
     _transform.dispose();
     _live.dispose();
     _patches.dispose();
@@ -559,6 +560,9 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
   }
 
   void _lassoStart(String pageId, Offset point) {
+    if (_stylus.selectionHaptic) {
+      prepareSelectionHaptic();
+    }
     setState(() {
       _lassoPageId = pageId;
       _lassoPoints = [point];
@@ -566,6 +570,7 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
           ? Rect.fromPoints(point, point)
           : null;
       _clearSelection();
+      _lassoLive.value = LassoDrag(points: _lassoPoints, rect: _lassoRect);
     });
   }
 
@@ -574,15 +579,15 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
       return;
     }
     if (_lassoShape == LassoShape.rect) {
-      setState(() {
-        _lassoRect = Rect.fromPoints(_lassoPoints.first, point);
-      });
+      _lassoRect = Rect.fromPoints(_lassoPoints.first, point);
+      _lassoLive.value = LassoDrag(points: _lassoPoints, rect: _lassoRect);
       return;
     }
     if ((point - _lassoPoints.last).distance < 1.5) {
       return;
     }
-    setState(() => _lassoPoints = [..._lassoPoints, point]);
+    _lassoPoints = [..._lassoPoints, point];
+    _lassoLive.value = LassoDrag(points: _lassoPoints, rect: null);
   }
 
   void _lassoEnd(String pageId, Offset point) {
@@ -590,8 +595,9 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
       return;
     }
     _lassoMove(pageId, point);
-    final polygon = _lassoShape == LassoShape.free && _lassoPoints.length >= 3
-        ? _lassoPoints
+    final drawn = List<Offset>.of(_lassoPoints);
+    final polygon = _lassoShape == LassoShape.free && drawn.length >= 3
+        ? _coarsePolygon(drawn)
         : null;
     final rect = _lassoShape == LassoShape.rect ? _lassoRect : null;
     final page = _note.pages.where((item) => item.id == pageId);
@@ -629,6 +635,7 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
       _lassoPoints = const [];
       _lassoRect = null;
       _lassoPageId = null;
+      _lassoLive.value = null;
       _selectedStrokes = strokes;
       _selectedTexts = texts;
       _selectionPageId = strokes.isEmpty && texts.isEmpty ? null : pageId;
@@ -638,58 +645,52 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
           : boundsOfObjects(strokes: strokes, texts: texts);
       _lassoOutline = strokes.isEmpty && texts.isEmpty
           ? const []
-          : (polygon == null ? const <Offset>[] : List<Offset>.of(polygon));
+          : (_lassoShape == LassoShape.free && drawn.length >= 3
+                ? drawn
+                : const <Offset>[]);
     });
   }
 
-  void _selectionMove(Offset delta) {
-    if (delta == Offset.zero) {
-      return;
-    }
+  void _selectionMove(Offset pagePoint) {
     _beginSelectionGesture();
-    final shift = Matrix4.translationValues(delta.dx, delta.dy, 0);
-    _gestureMatrix = shift.multiplied(_gestureMatrix!);
+    _dragStart ??= pagePoint;
+    final delta = pagePoint - _dragStart!;
+    _gestureMatrix = Matrix4.translationValues(delta.dx, delta.dy, 0);
     _publishPreview();
   }
 
-  void _selectionScale(SelectionHandle handle, Offset delta) {
-    final bounds = _selectionBounds;
-    if (bounds == null || bounds.width < 1 || bounds.height < 1) {
+  void _selectionScale(SelectionHandle handle, Offset pagePoint) {
+    final startBounds = _gestureBounds ?? _selectionBounds;
+    if (startBounds == null ||
+        startBounds.width < 1 ||
+        startBounds.height < 1) {
       return;
     }
     _beginSelectionGesture();
-    final scaled = scaleFromHandle(handle, bounds, delta);
-    if (scaled.scaleX == 1 && scaled.scaleY == 1) {
-      return;
-    }
-    final about = Matrix4.identity()
-      ..translate(scaled.origin.dx, scaled.origin.dy)
-      ..scale(scaled.scaleX, scaled.scaleY)
-      ..translate(-scaled.origin.dx, -scaled.origin.dy);
-    _gestureMatrix = about.multiplied(_gestureMatrix!);
+    _scaleHandle ??= handle;
+    _dragStart ??= pagePoint;
+    _gestureMatrix = selectionScaleMatrix(
+      handle: _scaleHandle!,
+      startBounds: _gestureBounds!,
+      startPointer: _dragStart!,
+      currentPointer: pagePoint,
+    );
     _publishPreview();
   }
 
-  void _selectionRotate(Offset pointer) {
-    if (_selectionBounds == null && _gestureCenter == null) {
+  void _selectionRotate(Offset pagePoint) {
+    final startBounds = _gestureBounds ?? _selectionBounds;
+    if (startBounds == null) {
       return;
     }
     _beginSelectionGesture();
-    _gestureCenter ??= _selectionBounds!.center;
-    _rotateOrigin ??= pointer;
-    final center = _gestureCenter!;
-    final origin = _rotateOrigin!;
-    final start = math.atan2(origin.dy - center.dy, origin.dx - center.dx);
-    final end = math.atan2(pointer.dy - center.dy, pointer.dx - center.dx);
-    if (end == start) {
-      return;
-    }
-    final turns = end - start;
-    final spin = Matrix4.identity()
-      ..translate(center.dx, center.dy)
-      ..rotateZ(turns)
-      ..translate(-center.dx, -center.dy);
-    _gestureMatrix = spin;
+    _gestureCenter ??= _gestureBounds!.center;
+    _dragStart ??= pagePoint;
+    _gestureMatrix = selectionRotateMatrix(
+      center: _gestureCenter!,
+      startPointer: _dragStart!,
+      currentPointer: pagePoint,
+    );
     _publishPreview();
   }
 
@@ -699,18 +700,18 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
       return;
     }
     _beginSelectionGesture();
-    final center = bounds.center;
+    final center = _gestureBounds!.center;
     final mirror = Matrix4.identity();
     if (horizontal) {
       mirror
-        ..translate(center.dx, 0.0)
-        ..scale(-1.0, 1.0)
-        ..translate(-center.dx, 0.0);
+        ..translateByDouble(center.dx, 0.0, 0, 1)
+        ..scaleByDouble(-1.0, 1.0, 1, 1)
+        ..translateByDouble(-center.dx, 0.0, 0, 1);
     } else {
       mirror
-        ..translate(0.0, center.dy)
-        ..scale(1.0, -1.0)
-        ..translate(0.0, -center.dy);
+        ..translateByDouble(0.0, center.dy, 0, 1)
+        ..scaleByDouble(1.0, -1.0, 1, 1)
+        ..translateByDouble(0.0, -center.dy, 0, 1);
     }
     _gestureMatrix = mirror;
     _publishPreview();
@@ -721,7 +722,6 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     if (_gestureStrokes != null) {
       return;
     }
-    _gestureEpoch++;
     _gestureStrokes = [
       for (final stroke in _selectedStrokes) _cloneStroke(stroke),
     ];
@@ -729,61 +729,49 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     _gestureOutline = List<Offset>.of(_lassoOutline);
     _gestureBounds = _selectionBounds;
     _gestureMatrix = Matrix4.identity();
-    _captureSelectionImage(_gestureEpoch);
+    _dragStart = null;
+    _scaleHandle = null;
+    _gestureCenter = null;
+    _gesturePicture?.dispose();
+    _gesturePicture = _recordSelection(_gestureStrokes!, _gestureOutline);
   }
 
-  Future<void> _captureSelectionImage(int epoch) async {
-    final strokes = _gestureStrokes;
-    final bounds = _gestureBounds;
-    if (strokes == null || bounds == null || bounds.isEmpty) {
-      return;
+  ui.Picture? _recordSelection(List<StrokeObject> strokes, List<Offset>? outline) {
+    if (strokes.isEmpty && (outline == null || outline.length < 2)) {
+      return null;
     }
-    final pad = bounds.inflate(8);
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder);
-    canvas.translate(-pad.left, -pad.top);
     for (final stroke in strokes) {
       paintStroke(canvas, stroke);
     }
-    final outline = _gestureOutline;
     if (outline != null && outline.length >= 2) {
-      final path = Path()..moveTo(outline.first.dx - pad.left, outline.first.dy - pad.top);
+      final path = Path()..moveTo(outline.first.dx, outline.first.dy);
       for (final point in outline.skip(1)) {
-        path.lineTo(point.dx - pad.left, point.dy - pad.top);
+        path.lineTo(point.dx, point.dy);
       }
       path.close();
       final paint = Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.4
         ..color = const Color(0xFF3D7EFF);
-      for (final metric in path.computeMetrics()) {
-        var distance = 0.0;
-        while (distance < metric.length) {
-          final next = math.min(distance + 6, metric.length);
-          canvas.drawPath(metric.extractPath(distance, next), paint);
-          distance = next + 4;
-        }
-      }
+      canvas.drawPath(path, paint);
     }
-    final picture = recorder.endRecording();
-    final dpr = mounted ? MediaQuery.devicePixelRatioOf(context).clamp(1.0, 2.0) : 1.0;
-    var width = math.max(1, (pad.width * dpr).ceil());
-    var height = math.max(1, (pad.height * dpr).ceil());
-    final longest = math.max(width, height);
-    if (longest > 2048) {
-      final fit = 2048 / longest;
-      width = math.max(1, (width * fit).floor());
-      height = math.max(1, (height * fit).floor());
+    return recorder.endRecording();
+  }
+
+  List<Offset> _coarsePolygon(List<Offset> points) {
+    if (points.length <= 96) {
+      return points;
     }
-    final image = await picture.toImage(width, height);
-    picture.dispose();
-    if (!mounted || epoch != _gestureEpoch) {
-      image.dispose();
-      return;
+    final step = (points.length / 96).ceil();
+    final coarse = <Offset>[
+      for (var index = 0; index < points.length; index += step) points[index],
+    ];
+    if (coarse.last != points.last) {
+      coarse.add(points.last);
     }
-    _gestureImage = image;
-    _gestureImageRect = pad;
-    _publishPreview();
+    return coarse;
   }
 
   void _publishPreview() {
@@ -794,13 +782,11 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     }
     final bounds = _boundsThrough(matrix, source);
     _selectionBounds = bounds;
-    final shot = _gestureImage;
     _selectionLive.value = SelectionPreview(
       strokes: const [],
       bounds: bounds,
-      image: shot,
-      imageRect: _gestureImageRect,
-      transform: shot == null ? null : matrix.storage,
+      picture: _gesturePicture,
+      transform: matrix.storage,
     );
     if (_selectionDirty) {
       return;
@@ -842,6 +828,9 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     final origins = _gestureStrokes;
     final originTexts = _gestureTexts ?? const <TextBox>[];
     final matrix = _gestureMatrix;
+    final sourceBounds = _gestureBounds;
+    final recorded = _gesturePicture;
+    final wasDirty = _selectionDirty;
     if (origins != null && matrix != null) {
       _selectedStrokes = [
         for (final stroke in origins)
@@ -855,9 +844,8 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
         for (final point in _gestureOutline ?? const <Offset>[])
           _through(matrix, point),
       ];
-      final source = _gestureBounds;
-      if (source != null) {
-        _selectionBounds = _boundsThrough(matrix, source);
+      if (sourceBounds != null) {
+        _selectionBounds = _boundsThrough(matrix, sourceBounds);
       }
       final pageId = _selectionPageId;
       final layerId = _selectionLayerId;
@@ -867,30 +855,32 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
         }
       }
     }
-    _gestureEpoch++;
-    _gestureStrokes = null;
     _gestureTexts = null;
     _gestureCenter = null;
     _gestureBounds = null;
     _gestureMatrix = null;
-    _rotateOrigin = null;
+    _dragStart = null;
+    _scaleHandle = null;
     _gestureOutline = null;
-    _rotateLast = null;
-    final shot = _gestureImage;
-    _gestureImage = null;
-    _gestureImageRect = null;
-    _selectionLive.value = null;
-    if (shot != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => shot.dispose());
-    }
-    if (!_selectionDirty || origins == null) {
+    _gesturePicture = null;
+    if (!wasDirty || origins == null || matrix == null) {
+      _gestureStrokes = null;
       _selectionDirty = false;
+      _selectionLive.value = null;
+      if (recorded != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => recorded.dispose());
+      }
       return;
     }
-    _selectionDirty = false;
     final pageId = _selectionPageId;
     final layerId = _selectionLayerId;
     if (pageId == null || layerId == null) {
+      _gestureStrokes = null;
+      _selectionDirty = false;
+      _selectionLive.value = null;
+      if (recorded != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => recorded.dispose());
+      }
       return;
     }
     final moved = <({TextBox before, TextBox after})>[];
@@ -909,12 +899,26 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
       for (final stroke in _selectedStrokes) _cloneStroke(stroke, id: newId()),
     ];
     if (strokesChanged) {
-      setState(() {
-        _selectedStrokes = baked;
-        _selectionBounds = boundsOfObjects(strokes: baked, texts: _selectedTexts);
-      });
+      _selectedStrokes = baked;
+      _selectionBounds = boundsOfObjects(
+        strokes: baked,
+        texts: _selectedTexts,
+      );
     }
+    // Keep origins hidden until commit lands; bridge with baked strokes.
+    _selectionLive.value = SelectionPreview(
+      strokes: strokesChanged ? baked : _selectedStrokes,
+      bounds: _selectionBounds!,
+      outline: _lassoOutline,
+    );
     if (!strokesChanged && moved.isEmpty) {
+      _gestureStrokes = null;
+      _selectionDirty = false;
+      _selectionLive.value = null;
+      if (recorded != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => recorded.dispose());
+      }
+      setState(() {});
       return;
     }
     _commit(
@@ -922,10 +926,18 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
         pageId: pageId,
         layerId: layerId,
         added: strokesChanged ? baked : const [],
-        tombstoned: strokesChanged ? [for (final stroke in origins) stroke.id] : const [],
+        tombstoned: strokesChanged
+            ? [for (final stroke in origins) stroke.id]
+            : const [],
         movedTexts: moved,
       ),
     );
+    _gestureStrokes = null;
+    _selectionDirty = false;
+    _selectionLive.value = null;
+    if (recorded != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => recorded.dispose());
+    }
   }
 
   void _copySelection() {
@@ -1027,21 +1039,19 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     _selectionBounds = null;
     _gestureStrokes = null;
     _gestureTexts = null;
-    _gestureEpoch++;
     _gestureCenter = null;
     _gestureBounds = null;
     _gestureMatrix = null;
-    _rotateOrigin = null;
+    _dragStart = null;
+    _scaleHandle = null;
     _gestureOutline = null;
     _lassoOutline = const [];
     _selectionDirty = false;
-    _rotateLast = null;
-    final shot = _gestureImage;
-    _gestureImage = null;
-    _gestureImageRect = null;
+    final recorded = _gesturePicture;
+    _gesturePicture = null;
     _selectionLive.value = null;
-    if (shot != null) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => shot.dispose());
+    if (recorded != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => recorded.dispose());
     }
   }
 
@@ -2506,6 +2516,7 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
               lassoPoints: _lassoPoints,
               lassoOutline: _lassoOutline,
               lassoRect: _lassoRect,
+              lassoLive: _lassoLive,
               selectionHaptic: _stylus.selectionHaptic,
               selectionBounds:
                   _selectedStrokes.isEmpty && _selectedTexts.isEmpty

@@ -1,9 +1,9 @@
-import 'dart:ui';
-
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yet_another_page/src/ink/selection.dart';
 import 'package:yet_another_page/src/ink/stroke.dart';
 import 'package:yet_another_page/src/ink/text_box.dart';
+import 'package:yet_another_page/src/ui/selection_frame.dart';
 
 void main() {
   test('a stroke is selected when only its edge crosses the lasso', () {
@@ -108,5 +108,57 @@ void main() {
       textHitsRegion(box, rect: const Rect.fromLTWH(100, 100, 5, 5)),
       isFalse,
     );
+  });
+
+  test('corner scale keeps the opposite corner fixed', () {
+    const bounds = Rect.fromLTWH(10, 20, 40, 60);
+    final matrix = selectionScaleMatrix(
+      handle: SelectionHandle.bottomRight,
+      startBounds: bounds,
+      startPointer: bounds.bottomRight,
+      currentPointer: const Offset(90, 140),
+    );
+    Offset map(Offset point) {
+      final m = matrix.storage;
+      return Offset(
+        m[0] * point.dx + m[4] * point.dy + m[12],
+        m[1] * point.dx + m[5] * point.dy + m[13],
+      );
+    }
+
+    expect(map(bounds.topLeft), bounds.topLeft);
+    expect(map(bounds.bottomRight).dx, closeTo(90, 0.001));
+    expect(map(bounds.bottomRight).dy, closeTo(140, 0.001));
+  });
+
+  test('move-style translation is absolute from the drag start', () {
+    const start = Offset(10, 10);
+    const current = Offset(40, 25);
+    final delta = current - start;
+    final matrix = Matrix4.translationValues(delta.dx, delta.dy, 0);
+    final m = matrix.storage;
+    expect(m[12], 30);
+    expect(m[13], 15);
+  });
+
+  test('rotate matrix spins around the frozen selection center', () {
+    const center = Offset(50, 50);
+    final matrix = selectionRotateMatrix(
+      center: center,
+      startPointer: const Offset(50, 20),
+      currentPointer: const Offset(80, 50),
+    );
+    Offset map(Offset point) {
+      final m = matrix.storage;
+      return Offset(
+        m[0] * point.dx + m[4] * point.dy + m[12],
+        m[1] * point.dx + m[5] * point.dy + m[13],
+      );
+    }
+
+    expect(map(center), center);
+    final spun = map(const Offset(50, 20));
+    expect(spun.dx, closeTo(80, 0.001));
+    expect(spun.dy, closeTo(50, 0.001));
   });
 }

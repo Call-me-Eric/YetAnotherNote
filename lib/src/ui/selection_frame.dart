@@ -3,7 +3,6 @@ import 'dart:math' as math;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
-import '../ink/eraser.dart';
 import '../input/finger.dart';
 
 class EraserOptionsBar extends StatelessWidget {
@@ -285,17 +284,26 @@ class SelectionFrame extends StatelessWidget {
   });
 
   final Rect bounds;
-  final void Function(Offset delta) onMove;
+  /// Page-space pointer position (not frame-local delta).
+  final void Function(Offset pagePoint) onMove;
   final VoidCallback onMoveEnd;
-  final void Function(SelectionHandle handle, Offset delta) onScale;
+  final void Function(SelectionHandle handle, Offset pagePoint) onScale;
   final VoidCallback onScaleEnd;
-  final void Function(Offset pointer) onRotate;
+  final void Function(Offset pagePoint) onRotate;
   final VoidCallback onRotateEnd;
   final VoidCallback onMenu;
 
   @override
   Widget build(BuildContext context) {
     final stem = 16 + bounds.shortestSide * 0.12;
+    Offset pagePoint(Offset global) {
+      final box = context.findRenderObject() as RenderBox?;
+      if (box == null) {
+        return global;
+      }
+      return box.globalToLocal(global);
+    }
+
     return Stack(
       clipBehavior: Clip.none,
       children: [
@@ -311,10 +319,9 @@ class SelectionFrame extends StatelessWidget {
                   GestureRecognizerFactoryWithHandlers<PanGestureRecognizer>(
                     PanGestureRecognizer.new,
                     (instance) {
-                      instance.onUpdate = (details) => onMove(details.delta);
-                      instance.onEnd = (_) {
-                        onMoveEnd();
-                      };
+                      instance.onUpdate = (details) =>
+                          onMove(pagePoint(details.globalPosition));
+                      instance.onEnd = (_) => onMoveEnd();
                     },
                   ),
               LongPressGestureRecognizer:
@@ -336,9 +343,8 @@ class SelectionFrame extends StatelessWidget {
         for (final handle in SelectionHandle.values)
           if (handle != SelectionHandle.rotate)
             _knob(
-              context,
               handle.anchor(bounds),
-              onPan: (delta) => onScale(handle, delta),
+              onPan: (global) => onScale(handle, pagePoint(global)),
               onEnd: onScaleEnd,
             ),
         Positioned(
@@ -349,22 +355,18 @@ class SelectionFrame extends StatelessWidget {
           child: const ColoredBox(color: Color(0xFF3D7EFF)),
         ),
         _knob(
-          context,
           Offset(bounds.center.dx, bounds.top - stem),
-          onPan: onRotate,
+          onPan: (global) => onRotate(pagePoint(global)),
           onEnd: onRotateEnd,
-          local: true,
         ),
       ],
     );
   }
 
   Widget _knob(
-    BuildContext context,
     Offset center, {
-    required void Function(Offset delta) onPan,
+    required void Function(Offset global) onPan,
     required VoidCallback onEnd,
-    bool local = false,
   }) {
     const size = 16.0;
     return Positioned(
@@ -374,17 +376,7 @@ class SelectionFrame extends StatelessWidget {
       height: size,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onPanUpdate: (details) {
-          if (!local) {
-            onPan(details.delta);
-            return;
-          }
-          final box = context.findRenderObject() as RenderBox?;
-          if (box == null) {
-            return;
-          }
-          onPan(box.globalToLocal(details.globalPosition));
-        },
+        onPanUpdate: (details) => onPan(details.globalPosition),
         onPanEnd: (_) => onEnd(),
         child: DecoratedBox(
           decoration: BoxDecoration(
@@ -398,9 +390,19 @@ class SelectionFrame extends StatelessWidget {
   }
 }
 
-enum SelectionHandle { topLeft, topRight, bottomRight, bottomLeft, top, right, bottom, left, rotate }
+enum SelectionHandle {
+  topLeft,
+  topRight,
+  bottomRight,
+  bottomLeft,
+  top,
+  right,
+  bottom,
+  left,
+  rotate,
+}
 
-extension on SelectionHandle {
+extension SelectionHandleGeometry on SelectionHandle {
   Offset anchor(Rect bounds) {
     return switch (this) {
       SelectionHandle.topLeft => bounds.topLeft,
@@ -415,8 +417,24 @@ extension on SelectionHandle {
     };
   }
 
+  /// Fixed pivot while dragging this handle (GoodNotes: opposite side/corner).
+  Offset opposite(Rect bounds) {
+    return switch (this) {
+      SelectionHandle.topLeft => bounds.bottomRight,
+      SelectionHandle.topRight => bounds.bottomLeft,
+      SelectionHandle.bottomRight => bounds.topLeft,
+      SelectionHandle.bottomLeft => bounds.topRight,
+      SelectionHandle.top => bounds.bottomCenter,
+      SelectionHandle.right => bounds.centerLeft,
+      SelectionHandle.bottom => bounds.topCenter,
+      SelectionHandle.left => bounds.centerRight,
+      SelectionHandle.rotate => bounds.center,
+    };
+  }
+
   bool get corner => index < 4;
-  bool get horizontal => this == SelectionHandle.left || this == SelectionHandle.right;
+  bool get horizontal =>
+      this == SelectionHandle.left || this == SelectionHandle.right;
 }
 
 class _DashRectPainter extends CustomPainter {
@@ -453,33 +471,81 @@ class _DashRectPainter extends CustomPainter {
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
-({double scaleX, double scaleY, Offset origin}) scaleFromHandle(
-  SelectionHandle handle,
-  Rect bounds,
-  Offset delta,
-) {
+/// Absolute scale matrix from gesture start (opposite corner/edge fixed).
+Matrix4 selectionScaleMatrix({
+  required SelectionHandle handle,
+  required Rect startBounds,
+  required Offset startPointer,
+  required Offset currentPointer,
+}) {
+  final origin = handle.opposite(startBounds);
+  final startHandle = handle.anchor(startBounds);
+  final target = startHandle + (currentPointer - startPointer);
   if (handle.corner) {
-    final outwardX =
-        handle == SelectionHandle.topLeft || handle == SelectionHandle.bottomLeft
-        ? -delta.dx
-        : delta.dx;
-    final outwardY =
-        handle == SelectionHandle.topLeft || handle == SelectionHandle.topRight
-        ? -delta.dy
-        : delta.dy;
-    final useX = outwardX.abs() >= outwardY.abs();
-    final dominant = useX ? outwardX / bounds.width : outwardY / bounds.height;
-    final scale = (1 + dominant).clamp(0.2, 8.0);
-    return (scaleX: scale, scaleY: scale, origin: bounds.center);
+    final startVec = startHandle - origin;
+    final endVec = target - origin;
+    final startLen = startVec.distance;
+    if (startLen < 1e-6) {
+      return Matrix4.identity();
+    }
+    final crossed = startVec.dx * endVec.dx + startVec.dy * endVec.dy < 0;
+    final scale = crossed
+        ? 0.2
+        : (endVec.distance / startLen).clamp(0.2, 8.0);
+    return _scaleAbout(origin, scale, scale);
   }
   if (handle.horizontal) {
-    final sign = handle == SelectionHandle.right ? 1.0 : -1.0;
-    final scale = (1 + sign * delta.dx / bounds.width).clamp(0.2, 8.0);
-    final origin = handle == SelectionHandle.right ? bounds.centerLeft : bounds.centerRight;
-    return (scaleX: scale, scaleY: 1, origin: origin);
+    final startSpan = startHandle.dx - origin.dx;
+    if (startSpan.abs() < 1e-6) {
+      return Matrix4.identity();
+    }
+    var scale = (target.dx - origin.dx) / startSpan;
+    if (scale < 0) {
+      scale = 0.2;
+    } else {
+      scale = scale.clamp(0.2, 8.0);
+    }
+    return _scaleAbout(origin, scale, 1);
   }
-  final sign = handle == SelectionHandle.bottom ? 1.0 : -1.0;
-  final scale = (1 + sign * delta.dy / bounds.height).clamp(0.2, 8.0);
-  final origin = handle == SelectionHandle.bottom ? bounds.topCenter : bounds.bottomCenter;
-  return (scaleX: 1, scaleY: scale, origin: origin);
+  final startSpan = startHandle.dy - origin.dy;
+  if (startSpan.abs() < 1e-6) {
+    return Matrix4.identity();
+  }
+  var scale = (target.dy - origin.dy) / startSpan;
+  if (scale < 0) {
+    scale = 0.2;
+  } else {
+    scale = scale.clamp(0.2, 8.0);
+  }
+  return _scaleAbout(origin, 1, scale);
+}
+
+Matrix4 selectionRotateMatrix({
+  required Offset center,
+  required Offset startPointer,
+  required Offset currentPointer,
+}) {
+  final start = math.atan2(
+    startPointer.dy - center.dy,
+    startPointer.dx - center.dx,
+  );
+  final end = math.atan2(
+    currentPointer.dy - center.dy,
+    currentPointer.dx - center.dx,
+  );
+  final turns = end - start;
+  if (turns == 0) {
+    return Matrix4.identity();
+  }
+  return Matrix4.identity()
+    ..translateByDouble(center.dx, center.dy, 0, 1)
+    ..rotateZ(turns)
+    ..translateByDouble(-center.dx, -center.dy, 0, 1);
+}
+
+Matrix4 _scaleAbout(Offset origin, double scaleX, double scaleY) {
+  return Matrix4.identity()
+    ..translateByDouble(origin.dx, origin.dy, 0, 1)
+    ..scaleByDouble(scaleX, scaleY, 1, 1)
+    ..translateByDouble(-origin.dx, -origin.dy, 0, 1);
 }

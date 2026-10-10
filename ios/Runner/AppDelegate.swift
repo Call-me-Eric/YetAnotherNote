@@ -19,8 +19,9 @@ import UIKit
   }
 }
 
-/// iOS adapter for [StylusSideButton]. Apple Pencil Pro squeeze is reported
-/// as a side-button press. The channel method is `sideButton`.
+/// iOS adapter for [StylusSideButton]. Squeeze, double tap, and haptic are
+/// translated into the shared stylus channel. Other platforms implement the
+/// same channel with their own hardware.
 final class ApplePencilSideButton {
   static let shared = ApplePencilSideButton()
 
@@ -31,8 +32,13 @@ final class ApplePencilSideButton {
     let channel = FlutterMethodChannel(name: "dev.yetanotherpage/stylus", binaryMessenger: messenger)
     self.channel = channel
     channel.setMethodCallHandler { call, result in
-      if call.method == "selectionHaptic" {
+      if call.method == "playHaptic" {
         ApplePencilSideButton.playSelectionHaptic(call.arguments)
+        result(nil)
+        return
+      }
+      if call.method == "prepareHaptic" {
+        ApplePencilSideButton.prepareSelectionHaptic()
         result(nil)
         return
       }
@@ -66,20 +72,36 @@ final class ApplePencilSideButton {
     view.addInteraction(interaction)
   }
 
+  private static var canvasFeedback: AnyObject?
+
+  static func prepareSelectionHaptic() {
+    guard #available(iOS 17.5, *) else { return }
+    let generator = reusedCanvasFeedback()
+    generator.prepare()
+  }
+
   static func playSelectionHaptic(_ arguments: Any?) {
     guard #available(iOS 17.5, *) else { return }
-    let point = hapticPoint(arguments)
-    let generator = UICanvasFeedbackGenerator()
-    generator.prepare()
-    generator.alignmentOccurred(at: point)
+    let generator = reusedCanvasFeedback()
+    generator.alignmentOccurred(at: hapticPoint(arguments))
+  }
+
+  @available(iOS 17.5, *)
+  private static func reusedCanvasFeedback() -> UICanvasFeedbackGenerator {
+    if let existing = canvasFeedback as? UICanvasFeedbackGenerator {
+      return existing
+    }
+    let created = UICanvasFeedbackGenerator()
+    created.prepare()
+    canvasFeedback = created
+    return created
   }
 
   private static func hapticPoint(_ arguments: Any?) -> CGPoint {
-    guard let map = arguments as? [String: Any],
-          let x = map["x"] as? Double,
-          let y = map["y"] as? Double else {
-      return .zero
-    }
+    guard let map = arguments as? [String: Any] else { return .zero }
+    let x = (map["x"] as? NSNumber)?.doubleValue
+    let y = (map["y"] as? NSNumber)?.doubleValue
+    guard let x, let y else { return .zero }
     return CGPoint(x: x, y: y)
   }
 }

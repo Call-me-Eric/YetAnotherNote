@@ -42,6 +42,20 @@ bool strokeHitsRegion(
   List<Offset>? polygon,
 }) {
   final points = stroke.points;
+  if (points.isEmpty) {
+    return false;
+  }
+  final pad = _strokeReach(points);
+  final strokeBounds = _strokeBounds(points, pad);
+  if (rect != null && !strokeBounds.overlaps(rect.inflate(pad))) {
+    return false;
+  }
+  if (polygon != null && polygon.length >= 3) {
+    final polygonBounds = _pointBounds(polygon).inflate(pad);
+    if (!strokeBounds.overlaps(polygonBounds)) {
+      return false;
+    }
+  }
   for (var index = 0; index < points.length; index++) {
     final point = points[index];
     final at = Offset(point.x, point.y);
@@ -105,6 +119,44 @@ bool textHitsRegion(TextBox box, {Rect? rect, List<Offset>? polygon}) {
     }
   }
   return false;
+}
+
+double _strokeReach(List<StrokePoint> points) {
+  var reach = 0.0;
+  for (final point in points) {
+    if (point.width > reach) {
+      reach = point.width;
+    }
+  }
+  return reach / 2;
+}
+
+Rect _strokeBounds(List<StrokePoint> points, double reach) {
+  var left = double.infinity;
+  var top = double.infinity;
+  var right = double.negativeInfinity;
+  var bottom = double.negativeInfinity;
+  for (final point in points) {
+    left = math.min(left, point.x - reach);
+    top = math.min(top, point.y - reach);
+    right = math.max(right, point.x + reach);
+    bottom = math.max(bottom, point.y + reach);
+  }
+  return Rect.fromLTRB(left, top, right, bottom);
+}
+
+Rect _pointBounds(List<Offset> points) {
+  var left = double.infinity;
+  var top = double.infinity;
+  var right = double.negativeInfinity;
+  var bottom = double.negativeInfinity;
+  for (final point in points) {
+    left = math.min(left, point.dx);
+    top = math.min(top, point.dy);
+    right = math.max(right, point.dx);
+    bottom = math.max(bottom, point.dy);
+  }
+  return Rect.fromLTRB(left, top, right, bottom);
 }
 
 bool _diskHitsRect(Offset center, double radius, Rect rect) {
