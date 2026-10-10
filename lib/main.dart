@@ -3,13 +3,13 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
-import 'src/input/stylus_input.dart';
+import 'src/input/stylus_side_button.dart';
 import 'src/storage/vault.dart';
 import 'src/ui/library_page.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  StylusInput.attachPlatform();
+  stylusSideButton.attachPlatform();
   runApp(const YetAnotherPageApp());
 }
 

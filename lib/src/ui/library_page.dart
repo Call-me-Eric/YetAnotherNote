@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../input/stylus_input.dart';
+import '../input/stylus_side_button.dart';
 import '../storage/note_document.dart';
 import '../storage/vault.dart';
 import 'note_page.dart';
@@ -26,12 +26,12 @@ class _LibraryPageState extends State<LibraryPage> {
   void initState() {
     super.initState();
     _notes = widget.vault.listSummaries();
-    StylusInput.addHandler(_onSqueeze);
+    stylusSideButton.addListener(_onSideButton);
   }
 
   @override
   void dispose() {
-    StylusInput.removeHandler(_onSqueeze);
+    stylusSideButton.removeListener(_onSideButton);
     super.dispose();
   }
 
@@ -41,7 +41,7 @@ class _LibraryPageState extends State<LibraryPage> {
     });
   }
 
-  void _onSqueeze(Offset? position) {
+  void _onSideButton(Offset? position) {
     final note = _hovered;
     if (note == null || _menuOpen || !mounted) {
       return;

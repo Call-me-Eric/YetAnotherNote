@@ -8,7 +8,7 @@ import '../ids.dart';
 import '../ink/eraser.dart';
 import '../ink/stroke.dart';
 import '../ink/text_box.dart';
-import '../input/stylus_input.dart';
+import '../input/stylus_side_button.dart';
 import '../storage/note_document.dart';
 import '../storage/vault.dart';
 import 'layer_panel.dart';
@@ -76,7 +76,7 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     _note = widget.note;
     _selectedPageId = widget.note.pages.first.id;
     _transform = TransformationController();
-    StylusInput.addHandler(_toggleArc);
+    stylusSideButton.addListener(_toggleArc);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       FocusManager.instance.primaryFocus?.unfocus();
     });
@@ -84,7 +84,7 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
 
   @override
   void dispose() {
-    StylusInput.removeHandler(_toggleArc);
+    stylusSideButton.removeListener(_toggleArc);
     _inertia?.dispose();
     _arc?.remove();
     _arc = null;

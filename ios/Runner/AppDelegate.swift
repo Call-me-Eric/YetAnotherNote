@@ -12,15 +12,17 @@ import UIKit
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
-    StylusBridge.shared.register(messenger: engineBridge.applicationRegistrar.messenger())
+    ApplePencilSideButton.shared.register(messenger: engineBridge.applicationRegistrar.messenger())
     DispatchQueue.main.async {
-      StylusBridge.shared.attachToForeground(UIApplication.shared)
+      ApplePencilSideButton.shared.attachToForeground(UIApplication.shared)
     }
   }
 }
 
-final class StylusBridge {
-  static let shared = StylusBridge()
+/// iOS adapter for [StylusSideButton]. Apple Pencil Pro squeeze is reported
+/// as a side-button press. The channel method is `sideButton`.
+final class ApplePencilSideButton {
+  static let shared = ApplePencilSideButton()
 
   var channel: FlutterMethodChannel?
   private var squeezeRelay: AnyObject?
@@ -32,7 +34,7 @@ final class StylusBridge {
       object: nil,
       queue: .main
     ) { _ in
-      StylusBridge.shared.attachToForeground(UIApplication.shared)
+      ApplePencilSideButton.shared.attachToForeground(UIApplication.shared)
     }
   }
 
@@ -69,6 +71,6 @@ final class PencilSqueezeRelay: NSObject, UIPencilInteractionDelegate {
       args["x"] = pose.location.x
       args["y"] = pose.location.y
     }
-    StylusBridge.shared.channel?.invokeMethod("toggleToolArc", arguments: args)
+    ApplePencilSideButton.shared.channel?.invokeMethod("sideButton", arguments: args)
   }
 }

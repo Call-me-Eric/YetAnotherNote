@@ -5,7 +5,7 @@ import 'package:yet_another_page/src/ink/text_box.dart';
 import 'package:yet_another_page/src/paper.dart';
 import 'package:yet_another_page/src/storage/note_document.dart';
 import 'package:yet_another_page/src/storage/vault.dart';
-import 'package:yet_another_page/src/input/stylus_input.dart';
+import 'package:yet_another_page/src/input/stylus_side_button.dart';
 import 'package:yet_another_page/src/ui/library_page.dart';
 import 'package:yet_another_page/src/ui/note_page.dart';
 
@@ -44,7 +44,9 @@ void main() {
     expect(find.byType(ListTile), findsOneWidget);
   });
 
-  testWidgets('a stylus squeeze opens and closes the tool arc', (tester) async {
+  testWidgets('a stylus side button opens and closes the tool arc', (
+    tester,
+  ) async {
     final library = _MemoryLibrary();
     final note = await library.createNote('笔');
     await tester.pumpWidget(
@@ -54,7 +56,7 @@ void main() {
     );
     await tester.pump();
 
-    StylusInput.toggleToolArc(const Offset(240, 320));
+    stylusSideButton.report(const Offset(240, 320));
     await tester.pump();
     expect(find.byKey(const ValueKey('tool-arc')), findsOneWidget);
     expect(find.byKey(const ValueKey('arc-pen')), findsOneWidget);
@@ -65,10 +67,10 @@ void main() {
     await tester.pump();
     expect(find.byKey(const ValueKey('tool-arc')), findsNothing);
 
-    StylusInput.toggleToolArc(null);
+    stylusSideButton.report(null);
     await tester.pump();
     expect(find.byKey(const ValueKey('tool-arc')), findsOneWidget);
-    StylusInput.toggleToolArc(const Offset(240, 320));
+    stylusSideButton.report(const Offset(240, 320));
     await tester.pump();
     expect(find.byKey(const ValueKey('tool-arc')), findsNothing);
   });

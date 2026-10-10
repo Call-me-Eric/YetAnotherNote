@@ -2,7 +2,7 @@
 
 跨平台手写笔记。界面用 Flutter，笔迹用自有矢量格式，笔记目录以 `.yep` 结尾。各平台打开同一份笔记。不使用 PencilKit 保存或渲染笔迹。
 
-产品约束在 [idea.md](idea.md)。还没做的阶段在 [schedule.md](schedule.md)。
+产品约束在 [idea.md](idea.md)。还没做的阶段在 [schedule.md](schedule.md)。改代码前先看 [开发者手册](docs/developer.md)。
 
 ## 运行
 
