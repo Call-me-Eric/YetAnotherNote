@@ -1,9 +1,15 @@
+import 'dart:async';
+
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
+import '../ink/pen_palette.dart';
+import '../input/finger.dart';
 import '../input/stylus_side_button.dart';
 import '../storage/note_document.dart';
 import '../storage/vault.dart';
 import 'note_page.dart';
+import 'settings_page.dart';
 import 'title_dialog.dart';
 
 class LibraryPage extends StatefulWidget {
@@ -19,7 +25,12 @@ class _LibraryPageState extends State<LibraryPage> {
   late Future<List<NoteSummary>> _notes;
   NoteSummary? _hovered;
   Offset? _hoverPosition;
-  Offset? _pressPosition;
+  int? _pressPointer;
+  Offset? _pressDown;
+  NoteSummary? _pressNote;
+  Timer? _pressTimer;
+  var _pressHeld = false;
+  var _pressDragged = false;
   var _menuOpen = false;
 
   @override
@@ -31,6 +42,7 @@ class _LibraryPageState extends State<LibraryPage> {
 
   @override
   void dispose() {
+    _pressTimer?.cancel();
     stylusSideButton.removeListener(_onSideButton);
     super.dispose();
   }
@@ -47,6 +59,55 @@ class _LibraryPageState extends State<LibraryPage> {
       return;
     }
     _showMenu(note, position ?? _hoverPosition ?? Offset.zero);
+  }
+
+  void _noteDown(NoteSummary note, PointerDownEvent event) {
+    final finger = actsAsFinger(event.kind, stylusAsFinger: true);
+    if (!finger && event.kind != PointerDeviceKind.mouse) {
+      return;
+    }
+    _pressTimer?.cancel();
+    _pressPointer = event.pointer;
+    _pressDown = event.position;
+    _pressNote = note;
+    _pressHeld = false;
+    _pressDragged = false;
+    _pressTimer = Timer(fingerLongPress, () {
+      if (!mounted || _pressPointer != event.pointer || _pressDragged) {
+        return;
+      }
+      _pressHeld = true;
+      final held = _pressNote;
+      if (held != null) {
+        _showMenu(held, _pressDown ?? event.position);
+      }
+    });
+  }
+
+  void _noteMove(PointerMoveEvent event) {
+    if (event.pointer != _pressPointer) {
+      return;
+    }
+    final down = _pressDown;
+    if (down != null && (event.position - down).distance > fingerSlop) {
+      _pressDragged = true;
+      _pressTimer?.cancel();
+    }
+  }
+
+  void _noteUp(PointerEvent event) {
+    if (event.pointer != _pressPointer) {
+      return;
+    }
+    _pressTimer?.cancel();
+    final note = _pressNote;
+    final open = !_pressHeld && !_pressDragged;
+    _pressPointer = null;
+    _pressNote = null;
+    _pressDown = null;
+    if (open && note != null) {
+      _open(note);
+    }
   }
 
   Future<void> _showMenu(NoteSummary note, Offset global) async {
@@ -166,7 +227,37 @@ class _LibraryPageState extends State<LibraryPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('YetAnotherPage')),
+      appBar: AppBar(
+        title: const Text('YetAnotherPage'),
+        actions: [
+          IconButton(
+            tooltip: '设置',
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (context) => SettingsPage(
+                    load: () {
+                      final vault = widget.vault;
+                      if (vault is Vault) {
+                        return vault.readPenPalette();
+                      }
+                      return Future.value(PenPalette.initial());
+                    },
+                    save: (palette) {
+                      final vault = widget.vault;
+                      if (vault is Vault) {
+                        return vault.writePenPalette(palette);
+                      }
+                      return Future.value();
+                    },
+                  ),
+                ),
+              );
+            },
+            icon: const Icon(Icons.settings),
+          ),
+        ],
+      ),
       body: FutureBuilder<List<NoteSummary>>(
         future: _notes,
         builder: (context, snapshot) {
@@ -195,15 +286,13 @@ class _LibraryPageState extends State<LibraryPage> {
                   }
                 },
                 child: Listener(
-                  onPointerDown: (event) => _pressPosition = event.position,
+                  onPointerDown: (event) => _noteDown(note, event),
+                  onPointerMove: _noteMove,
+                  onPointerUp: _noteUp,
+                  onPointerCancel: _noteUp,
                   child: ListTile(
                     title: Text(note.title),
                     subtitle: Text(note.directoryName),
-                    onTap: () => _open(note),
-                    onLongPress: () => _showMenu(
-                      note,
-                      _pressPosition ?? _hoverPosition ?? Offset.zero,
-                    ),
                   ),
                 ),
               );

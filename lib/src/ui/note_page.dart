@@ -6,13 +6,18 @@ import 'package:flutter/scheduler.dart';
 
 import '../ids.dart';
 import '../ink/eraser.dart';
+import '../ink/fix_text.dart';
+import '../ink/pen_palette.dart';
 import '../ink/stroke.dart';
 import '../ink/text_box.dart';
+import '../input/finger.dart';
 import '../input/stylus_side_button.dart';
 import '../storage/note_document.dart';
 import '../storage/vault.dart';
 import 'layer_panel.dart';
 import 'page_canvas.dart';
+import 'pen_settings.dart';
+import 'settings_page.dart';
 import 'title_dialog.dart';
 import 'tool_arc.dart';
 
@@ -44,7 +49,7 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
   final List<_MarkEdit> _undoStack = [];
   final List<_MarkEdit> _redoStack = [];
   final Set<String> _hidden = {};
-  final Map<int, Offset> _fingers = {};
+  final Map<int, _PanContact> _fingers = {};
   final Set<int> _ignoredFingers = {};
   var _multiTouch = false;
   Offset _panVelocity = Offset.zero;
@@ -55,16 +60,24 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
   var _centered = false;
   var _centerScheduled = false;
   InkTool _tool = InkTool.pen;
+  var _penBarOpen = false;
+  PenPalette _pen = PenPalette.initial();
+  var _penEpoch = 0;
   String? _editingTextId;
   String? _selectedTextId;
   String? _textHoverPageId;
   Offset? _textHoverLocal;
   final Map<String, ({String pageId, String layerId, TextBox box})>
   _textDrafts = {};
+  final Map<String, TextBox> _editOrigin = {};
+  final Map<String, TextBox> _gestureBefore = {};
   String? _eraserPageId;
   String? _eraserLayerId;
   Offset? _tip;
   OverlayEntry? _arc;
+  OverlayEntry? _presetArc;
+  Offset? _arcCenter;
+  List<PenPresetTarget> _presetTargets = const [];
   _InkLocator? _locator;
   String? _locatorPageId;
   String? _locatorLayerId;
@@ -77,6 +90,15 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     _selectedPageId = widget.note.pages.first.id;
     _transform = TransformationController();
     stylusSideButton.addListener(_toggleArc);
+    final vault = widget.vault;
+    if (vault is Vault) {
+      final epoch = _penEpoch;
+      vault.readPenPalette().then((palette) {
+        if (mounted && epoch == _penEpoch) {
+          setState(() => _pen = palette);
+        }
+      });
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       FocusManager.instance.primaryFocus?.unfocus();
     });
@@ -178,16 +200,21 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
   }
 
   void _fingerDown(PointerDownEvent event) {
-    final pans =
-        event.kind == PointerDeviceKind.touch ||
-        (_tool == InkTool.text && drawsInk(event.kind));
-    if (!pans) {
+    final finger = actsAsFinger(
+      event.kind,
+      stylusAsFinger: _tool == InkTool.text,
+    );
+    final mouseInText =
+        _tool == InkTool.text && event.kind == PointerDeviceKind.mouse;
+    if (!finger && !mouseInText) {
+      return;
+    }
+    if (_ignoredFingers.contains(event.pointer)) {
       return;
     }
     _stopInertia();
-    _ignoredFingers.remove(event.pointer);
-    _fingers[event.pointer] = event.position;
-    if (_fingers.length > 1) {
+    _fingers[event.pointer] = _PanContact(event.position, event.kind);
+    if (_touchCount > 1) {
       _multiTouch = true;
       _panVelocity = Offset.zero;
       _stopInertia();
@@ -202,11 +229,31 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     if (_ignoredFingers.contains(event.pointer)) {
       return;
     }
-    final previous = _fingers[event.pointer];
-    if (previous == null) {
+    final contact = _fingers[event.pointer];
+    if (contact == null) {
       return;
     }
-    _fingers[event.pointer] = event.position;
+    if (_touchCount == 2 && contact.kind == PointerDeviceKind.touch) {
+      final before = _touchCentroid();
+      final spanBefore = _touchSpan();
+      contact.position = event.position;
+      final spanAfter = _touchSpan();
+      final ratio = spanBefore == 0 ? 1.0 : spanAfter / spanBefore;
+      if (before != null && ratio > 0.98 && ratio < 1.02) {
+        final after = _touchCentroid();
+        if (after != null) {
+          final delta = after - before;
+          _transform.value =
+              Matrix4.translationValues(delta.dx, delta.dy, 0) *
+              _transform.value;
+        }
+      }
+      _panVelocity = Offset.zero;
+      _lastPanStamp = event.timeStamp;
+      return;
+    }
+    final previous = contact.position;
+    contact.position = event.position;
     if (_fingers.length != 1) {
       _lastPanStamp = event.timeStamp;
       return;
@@ -245,6 +292,42 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
       return;
     }
     _startInertia();
+  }
+
+  int get _touchCount {
+    var count = 0;
+    for (final contact in _fingers.values) {
+      if (contact.kind == PointerDeviceKind.touch) {
+        count += 1;
+      }
+    }
+    return count;
+  }
+
+  Offset? _touchCentroid() {
+    final points = [
+      for (final contact in _fingers.values)
+        if (contact.kind == PointerDeviceKind.touch) contact.position,
+    ];
+    if (points.length < 2) {
+      return null;
+    }
+    var sum = Offset.zero;
+    for (final point in points) {
+      sum += point;
+    }
+    return sum / points.length.toDouble();
+  }
+
+  double _touchSpan() {
+    final points = [
+      for (final contact in _fingers.values)
+        if (contact.kind == PointerDeviceKind.touch) contact.position,
+    ];
+    if (points.length < 2) {
+      return 0;
+    }
+    return (points[0] - points[1]).distance;
   }
 
   void _suppressPan(int pointer) {
@@ -300,18 +383,21 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     if (layer == null) {
       return;
     }
+    final width = _pen.width;
     final first = sampleFromPointer(
       event: event,
       x: event.localPosition.dx,
       y: event.localPosition.dy,
       time: 0,
-      baseWidth: penBaseWidth,
+      baseWidth: width,
     );
     final stroke = StrokeObject(
       id: newId(),
       tool: 'pen',
-      color: penColor,
-      baseWidth: penBaseWidth,
+      color: _pen.color,
+      baseWidth: width,
+      dashCycle: _pen.dash.cycle,
+      dashRatio: _pen.dash.ratio,
       finalized: false,
       points: [first],
     );
@@ -341,13 +427,13 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
       x: event.localPosition.dx,
       y: event.localPosition.dy,
       time: (event.timeStamp - session.started).inMicroseconds / 1000000,
-      baseWidth: penBaseWidth,
+      baseWidth: session.stroke.baseWidth,
     );
     final next = appendCausalPoint(
       raw: session.raw,
       painted: session.stroke.points,
       sample: sample,
-      baseWidth: penBaseWidth,
+      baseWidth: session.stroke.baseWidth,
       connected: session.cursor.connected,
       cursor: session.cursor,
     );
@@ -730,6 +816,18 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
   }
 
   void _retint(_MarkEdit edit, {required bool undo}) {
+    if (edit.textBefore != null && edit.textAfter != null) {
+      final box = undo ? edit.textBefore! : edit.textAfter!;
+      setState(() {
+        _textDrafts[box.id] = (
+          pageId: edit.pageId,
+          layerId: edit.layerId,
+          box: box,
+        );
+      });
+      _persistText(edit.pageId, edit.layerId, box);
+      return;
+    }
     final tombstone = undo
         ? [for (final stroke in edit.added) stroke.id]
         : edit.tombstoned;
@@ -819,16 +917,34 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
   }
 
   void _toggleArc(Offset? globalPosition) {
-    if (_tool == InkTool.text &&
-        _textHoverPageId != null &&
-        _textHoverLocal != null) {
-      final hit = _boxAt(_textHoverPageId!, _textHoverLocal!);
-      if (hit != null) {
-        _selectText(_textHoverPageId!, hit.id);
-        return;
+    if (_tool == InkTool.text) {
+      final pageId = _textHoverPageId;
+      final local = _textHoverLocal;
+      if (pageId != null && local != null) {
+        final hit = _boxAt(pageId, local);
+        if (hit != null) {
+          _selectText(pageId, hit.id);
+        }
       }
+      return;
+    }
+    if (_presetArc != null) {
+      if (globalPosition != null) {
+        for (final target in _presetTargets) {
+          if (target.rect.inflate(8).contains(globalPosition)) {
+            target.onLong();
+            return;
+          }
+        }
+      }
+      _closePresetArc();
+      return;
     }
     if (_arc != null) {
+      if (globalPosition != null && _penButtonContains(globalPosition)) {
+        _openPresetArc();
+        return;
+      }
       _closeArc();
       return;
     }
@@ -837,6 +953,7 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
         globalPosition ??
         _tip ??
         Offset(media.size.width / 2, media.size.height / 2);
+    _arcCenter = at;
     _arc = OverlayEntry(
       builder: (context) => ToolArc(
         center: at,
@@ -848,6 +965,7 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
             label: '钢笔',
             selected: _tool == InkTool.pen,
             onPressed: () => _chooseTool(InkTool.pen),
+            onLongPress: _openPresetArc,
           ),
           ToolArcAction(
             id: 'arc-text',
@@ -888,9 +1006,84 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     Overlay.of(context).insert(_arc!);
   }
 
+  Future<void> _openSettings() {
+    return Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => SettingsPage(
+          load: () {
+            final vault = widget.vault;
+            if (vault is Vault) {
+              return vault.readPenPalette();
+            }
+            return Future.value(_pen);
+          },
+          save: (palette) {
+            _applyPen(palette);
+            return Future.value();
+          },
+        ),
+      ),
+    );
+  }
+
+  void _penPressed() {
+    if (_tool == InkTool.pen) {
+      setState(() => _penBarOpen = !_penBarOpen);
+      return;
+    }
+    _chooseTool(InkTool.pen);
+  }
+
+  bool _penButtonContains(Offset global) {
+    final center = _arcCenter;
+    if (center == null) {
+      return false;
+    }
+    final media = MediaQuery.of(context);
+    final origin = ToolArc.placedCenter(center, media.size, media.padding);
+    final rect = ToolArc.buttonRect(origin: origin, index: 0, count: 6);
+    return rect.inflate(16).contains(global);
+  }
+
+  void _openPresetArc() {
+    final raw = _arcCenter;
+    if (raw == null) {
+      return;
+    }
+    _closePresetArc();
+    final media = MediaQuery.of(context);
+    final center = ToolArc.placedCenter(raw, media.size, media.padding);
+    _presetArc = OverlayEntry(
+      builder: (context) => PenPresetArc(
+        palette: _pen,
+        center: center,
+        onChanged: _applyPen,
+        onTargets: (targets) => _presetTargets = targets,
+      ),
+    );
+    Overlay.of(context).insert(_presetArc!);
+  }
+
+  void _closePresetArc() {
+    _presetArc?.remove();
+    _presetArc = null;
+    _presetTargets = const [];
+  }
+
+  void _applyPen(PenPalette palette) {
+    _penEpoch += 1;
+    setState(() => _pen = palette);
+    _presetArc?.markNeedsBuild();
+    final vault = widget.vault;
+    if (vault is Vault) {
+      _saveChain = _saveChain.then((_) => vault.writePenPalette(palette));
+    }
+  }
+
   void _chooseTool(InkTool tool) {
     _closeArc();
     setState(() {
+      _penBarOpen = false;
       _tool = tool;
       if (tool != InkTool.text) {
         _editingTextId = null;
@@ -996,11 +1189,38 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     if (_editingTextId != null) {
       _flushEditing();
     }
+    final stored = _storedText(id);
+    if (stored != null) {
+      _editOrigin[id] = stored;
+    }
     setState(() {
       _selectedPageId = pageId;
       _selectedTextId = id;
       _editingTextId = id;
     });
+  }
+
+  void _rememberText(String pageId, String layerId, TextBox before, TextBox after) {
+    if (before.source == after.source &&
+        before.x == after.x &&
+        before.y == after.y &&
+        before.width == after.width &&
+        before.height == after.height) {
+      _persistText(pageId, layerId, after);
+      return;
+    }
+    _undoStack.add(
+      _MarkEdit(
+        pageId: pageId,
+        layerId: layerId,
+        added: const [],
+        tombstoned: const [],
+        textBefore: before,
+        textAfter: after,
+      ),
+    );
+    _redoStack.clear();
+    _persistText(pageId, layerId, after);
   }
 
   void _deleteText(String pageId, String id) {
@@ -1035,6 +1255,7 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     if (box == null || layerId == null) {
       return;
     }
+    _gestureBefore.putIfAbsent(id, () => stored ?? box);
     final page = _note.pages.firstWhere((item) => item.id == pageId);
     final next = box.copyWith(
       x: (box.x + delta.dx).clamp(0.0, math.max(0.0, page.width - box.width)),
@@ -1047,10 +1268,15 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
 
   void _moveTextEnd(String pageId, String id) {
     final draft = _textDrafts[id];
+    final before = _gestureBefore.remove(id);
     if (draft == null) {
       return;
     }
-    _persistText(pageId, draft.layerId, draft.box);
+    if (before == null) {
+      _persistText(pageId, draft.layerId, draft.box);
+      return;
+    }
+    _rememberText(pageId, draft.layerId, before, draft.box);
   }
 
   TextBox? _storedText(String id) {
@@ -1089,9 +1315,15 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     }
     _editingTextId = null;
     final draft = _textDrafts[id];
-    if (draft != null) {
-      _persistText(draft.pageId, draft.layerId, draft.box);
+    final before = _editOrigin.remove(id);
+    if (draft == null) {
+      return;
     }
+    if (before == null) {
+      _persistText(draft.pageId, draft.layerId, draft.box);
+      return;
+    }
+    _rememberText(draft.pageId, draft.layerId, before, draft.box);
   }
 
   void _commitText(TextBox box, String source) {
@@ -1101,6 +1333,7 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     if (pageId == null || layerId == null) {
       return;
     }
+    final before = _editOrigin.remove(box.id) ?? _storedText(box.id) ?? box;
     final next = (draft?.box ?? box).copyWith(source: source);
     setState(() {
       _editingTextId = null;
@@ -1109,7 +1342,7 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
       }
       _textDrafts[next.id] = (pageId: pageId, layerId: layerId, box: next);
     });
-    _persistText(pageId, layerId, next);
+    _rememberText(pageId, layerId, before, next);
   }
 
   void _resizeText(TextBox box, double width, double height) {
@@ -1119,15 +1352,42 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     if (pageId == null || layerId == null) {
       return;
     }
+    final before = draft?.box ?? box;
     final page = _note.pages.firstWhere((item) => item.id == pageId);
-    final next = (draft?.box ?? box).copyWith(
-      width: width.clamp(64.0, page.width - (draft?.box ?? box).x),
-      height: height.clamp(40.0, page.height - (draft?.box ?? box).y),
+    final next = before.copyWith(
+      width: width.clamp(64.0, math.max(64.0, page.width - before.x)),
+      height: height.clamp(40.0, math.max(40.0, page.height - before.y)),
     );
     setState(() {
       _textDrafts[next.id] = (pageId: pageId, layerId: layerId, box: next);
     });
-    _persistText(pageId, layerId, next);
+    _rememberText(pageId, layerId, before, next);
+  }
+
+  // ignore: unused_element
+  Future<void> _fixText(String pageId, String id) async {
+    final box = _textDrafts[id]?.box ?? _storedText(id);
+    final layerId = _textDrafts[id]?.layerId ?? _layerOfText(id);
+    if (box == null || layerId == null) {
+      return;
+    }
+    final strokes = await fixTextBox(box);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _textDrafts.remove(id);
+      _selectedTextId = null;
+      _editingTextId = null;
+    });
+    _commit(
+      _MarkEdit(
+        pageId: pageId,
+        layerId: layerId,
+        added: strokes,
+        tombstoned: [id],
+      ),
+    );
   }
 
   String? _pageOfText(String id) {
@@ -1186,8 +1446,10 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
   }
 
   void _closeArc() {
+    _closePresetArc();
     _arc?.remove();
     _arc = null;
+    _arcCenter = null;
   }
 
   Future<void> _insert({required bool before}) async {
@@ -1221,6 +1483,11 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
             onPressed: _deleteNote,
             tooltip: '删除笔记',
             icon: const Icon(Icons.delete_outline),
+          ),
+          IconButton(
+            tooltip: '设置',
+            onPressed: _openSettings,
+            icon: const Icon(Icons.settings),
           ),
         ],
       ),
@@ -1319,13 +1586,18 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
       bottomNavigationBar: Material(
         elevation: 2,
         child: SafeArea(
-          child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (_tool == InkTool.pen && _penBarOpen)
+                PenPresetBar(palette: _pen, onChanged: _applyPen),
+              SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
               children: [
                 IconButton(
                   tooltip: '钢笔',
-                  onPressed: () => _chooseTool(InkTool.pen),
+                  onPressed: _penPressed,
                   color: _tool == InkTool.pen
                       ? Theme.of(context).colorScheme.primary
                       : null,
@@ -1397,10 +1669,19 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
               ],
             ),
           ),
+            ],
+          ),
         ),
       ),
     );
   }
+}
+
+class _PanContact {
+  _PanContact(this.position, this.kind);
+
+  Offset position;
+  final PointerDeviceKind kind;
 }
 
 class _MarkEdit {
@@ -1409,12 +1690,16 @@ class _MarkEdit {
     required this.layerId,
     required this.added,
     required this.tombstoned,
+    this.textBefore,
+    this.textAfter,
   });
 
   final String pageId;
   final String layerId;
   final List<StrokeObject> added;
   final List<String> tombstoned;
+  final TextBox? textBefore;
+  final TextBox? textAfter;
 }
 
 class _PenSession {

@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import '../ink/eraser.dart';
 import '../ink/stroke.dart';
 import '../ink/text_box.dart';
+import '../input/finger.dart';
 import 'text_box_view.dart';
 import '../storage/note_document.dart';
 
@@ -263,8 +264,8 @@ class _PageSheet extends StatefulWidget {
 }
 
 class _PageSheetState extends State<_PageSheet> {
-  static const _textHold = Duration(milliseconds: 380);
-  static const _textSlop = 10.0;
+  static const _textHold = fingerLongPress;
+  static const _textSlop = fingerSlop;
   static const _textMinWidth = 72.0;
   static const _textMinHeight = 44.0;
 
@@ -312,7 +313,7 @@ class _PageSheetState extends State<_PageSheet> {
           if (!_inside(event.localPosition)) {
             return;
           }
-          if (widget.tool == InkTool.text) {
+          if (widget.tool == InkTool.text && _textPointerKind(event.kind)) {
             _beginText(event);
             return;
           }
@@ -467,6 +468,7 @@ class _PageSheetState extends State<_PageSheet> {
                           widget.onTextEdit(widget.page.id, box.id),
                       onDelete: (box) =>
                           widget.onTextDelete(widget.page.id, box.id),
+                      onResizeDown: widget.onSuppressPan,
                     ),
                   ),
                   ValueListenableBuilder<Offset?>(
@@ -529,6 +531,13 @@ class _PageSheetState extends State<_PageSheet> {
       return (point - corner).distance <= 20;
     }
     return false;
+  }
+
+  /// Text gestures are finger gestures. In the text tool the stylus stands in
+  /// for a finger, so it uses the same short press, long press, and drag.
+  bool _textPointerKind(PointerDeviceKind kind) {
+    return actsAsFinger(kind, stylusAsFinger: true) ||
+        kind == PointerDeviceKind.mouse;
   }
 
   void _beginText(PointerDownEvent event) {

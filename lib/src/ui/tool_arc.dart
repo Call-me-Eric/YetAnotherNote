@@ -8,6 +8,7 @@ class ToolArcAction {
     required this.icon,
     required this.label,
     required this.onPressed,
+    this.onLongPress,
     this.selected = false,
   });
 
@@ -15,6 +16,7 @@ class ToolArcAction {
   final IconData icon;
   final String label;
   final VoidCallback? onPressed;
+  final VoidCallback? onLongPress;
   final bool selected;
 }
 
@@ -31,8 +33,25 @@ class ToolArc extends StatelessWidget {
   final VoidCallback onDismiss;
 
   static const radius = 108.0;
+  static const buttonSize = 48.0;
   static const _start = math.pi + 0.28;
   static const _sweep = math.pi - 0.56;
+
+  static Offset placedCenter(Offset center, Size size, EdgeInsets padding) {
+    return _clamp(center, size, padding);
+  }
+
+  static Rect buttonRect({
+    required Offset origin,
+    required int index,
+    required int count,
+  }) {
+    final t = count == 1 ? 0.5 : index / (count - 1);
+    final angle = _start + _sweep * t;
+    final dx = origin.dx + math.cos(angle) * radius - buttonSize / 2;
+    final dy = origin.dy + math.sin(angle) * radius - buttonSize / 2;
+    return Rect.fromLTWH(dx, dy, buttonSize, buttonSize);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -70,28 +89,29 @@ class ToolArc extends StatelessWidget {
     int index,
     ToolArcAction action,
   ) {
-    final t = actions.length == 1 ? 0.5 : index / (actions.length - 1);
-    final angle = _start + _sweep * t;
-    const button = 48.0;
-    final dx = origin.dx + math.cos(angle) * radius - button / 2;
-    final dy = origin.dy + math.sin(angle) * radius - button / 2;
+    final rect = buttonRect(
+      origin: origin,
+      index: index,
+      count: actions.length,
+    );
     final scheme = Theme.of(context).colorScheme;
     return Positioned(
-      left: dx,
-      top: dy,
-      width: button,
-      height: button,
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
       child: Material(
         color: action.selected ? scheme.primaryContainer : Colors.white,
         elevation: 3,
         shape: const CircleBorder(
           side: BorderSide(color: Color(0xFF222222), width: 1.2),
         ),
-        child: IconButton(
+        child: InkWell(
           key: ValueKey(action.id),
-          tooltip: action.label,
-          onPressed: action.onPressed,
-          icon: Icon(action.icon, color: const Color(0xFF222222)),
+          customBorder: const CircleBorder(),
+          onTap: action.onPressed,
+          onLongPress: action.onLongPress,
+          child: Icon(action.icon, color: const Color(0xFF222222)),
         ),
       ),
     );

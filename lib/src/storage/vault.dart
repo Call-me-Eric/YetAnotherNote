@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../ids.dart';
+import '../ink/pen_palette.dart';
 import '../ink/stroke.dart';
 import '../ink/text_box.dart';
 import '../paper.dart';
@@ -89,7 +90,28 @@ class Vault implements NoteLibrary {
   final Directory root;
 
   static const deviceFileName = 'device.json';
+  static const penFileName = 'pen.json';
   static const noteSuffix = '.yep';
+
+  Future<PenPalette> readPenPalette() async {
+    final file = File('${root.path}/$penFileName');
+    if (!await file.exists()) {
+      return PenPalette.initial();
+    }
+    try {
+      return PenPalette.fromJson(jsonDecode(await file.readAsString()));
+    } on FormatException {
+      return PenPalette.initial();
+    }
+  }
+
+  Future<void> writePenPalette(PenPalette palette) async {
+    await root.create(recursive: true);
+    await writeAtomic(
+      File('${root.path}/$penFileName'),
+      encodeJson(palette.toJson()),
+    );
+  }
 
   Future<String> deviceId() async {
     await root.create(recursive: true);

@@ -19,6 +19,7 @@ class TextBoxLayer extends StatelessWidget {
     required this.onCommit,
     required this.onDraft,
     required this.onResize,
+    required this.onResizeDown,
     required this.onEdit,
     required this.onDelete,
     super.key,
@@ -32,12 +33,14 @@ class TextBoxLayer extends StatelessWidget {
   final void Function(TextBox box, String source) onCommit;
   final void Function(TextBox box, String source) onDraft;
   final void Function(TextBox box, double width, double height) onResize;
+  final void Function(int pointer) onResizeDown;
   final ValueChanged<TextBox> onEdit;
   final ValueChanged<TextBox> onDelete;
 
   @override
   Widget build(BuildContext context) {
     return Stack(
+      clipBehavior: Clip.none,
       children: [
         for (final box in boxes)
           _TextFrame(
@@ -49,6 +52,7 @@ class TextBoxLayer extends StatelessWidget {
             onCommit: (source) => onCommit(box, source),
             onDraft: (source) => onDraft(box, source),
             onResize: (width, height) => onResize(box, width, height),
+            onResizeDown: onResizeDown,
           ),
         for (final box in boxes)
           if (interactive && box.id == selectedId && box.id != editingId)
@@ -72,6 +76,7 @@ class _TextFrame extends StatefulWidget {
     required this.onCommit,
     required this.onDraft,
     required this.onResize,
+    required this.onResizeDown,
     super.key,
   });
 
@@ -82,6 +87,7 @@ class _TextFrame extends StatefulWidget {
   final ValueChanged<String> onCommit;
   final ValueChanged<String> onDraft;
   final void Function(double width, double height) onResize;
+  final void Function(int pointer) onResizeDown;
 
   @override
   State<_TextFrame> createState() => _TextFrameState();
@@ -161,9 +167,17 @@ class _TextFrameState extends State<_TextFrame> {
     return Positioned(
       left: widget.box.x,
       top: widget.box.y,
-      width: _width,
-      height: _height,
-      child: DecoratedBox(
+      width: _width + 20,
+      height: _height + 20,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Positioned(
+            left: 0,
+            top: 0,
+            width: _width,
+            height: _height,
+            child: DecoratedBox(
         decoration: BoxDecoration(
           color: widget.editing ? const Color(0xF7FFFFFF) : null,
           border: widget.editing
@@ -204,40 +218,46 @@ class _TextFrameState extends State<_TextFrame> {
             ),
             if (widget.interactive && widget.selected && !widget.editing)
               Positioned(
-                right: -11,
-                bottom: -11,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onPanUpdate: (details) {
-                    setState(() {
-                      _dragging = true;
-                      _width = (_width + details.delta.dx).clamp(64.0, 2000.0);
-                      _height = (_height + details.delta.dy).clamp(
-                        40.0,
-                        2000.0,
-                      );
-                    });
-                  },
-                  onPanEnd: (_) {
-                    _dragging = false;
-                    widget.onResize(_width, _height);
-                  },
-                  child: const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        border: Border.fromBorderSide(
-                          BorderSide(color: Color(0xFF222222)),
+                left: _width - 16,
+                top: _height - 16,
+                child: Listener(
+                  onPointerDown: (event) => widget.onResizeDown(event.pointer),
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onPanUpdate: (details) {
+                      setState(() {
+                        _dragging = true;
+                        _width = (_width + details.delta.dx).clamp(64.0, 2000.0);
+                        _height = (_height + details.delta.dy).clamp(
+                          40.0,
+                          2000.0,
+                        );
+                      });
+                    },
+                    onPanEnd: (_) {
+                      _dragging = false;
+                      widget.onResize(_width, _height);
+                    },
+                    child: const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          border: Border.fromBorderSide(
+                            BorderSide(color: Color(0xFF222222)),
+                          ),
                         ),
                       ),
                     ),
                   ),
                 ),
               ),
-          ],
+            ],
+          ),
         ),
+      ),
+        ],
       ),
     );
   }
@@ -258,7 +278,7 @@ class _TextMenu extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const menuWidth = 88.0;
+    const menuWidth = 96.0;
     final rightSide = box.x + box.width + 10;
     final placeLeft = rightSide + menuWidth > pageWidth - 8;
     final left = placeLeft ? box.x - menuWidth - 10 : rightSide;

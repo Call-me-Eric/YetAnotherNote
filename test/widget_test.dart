@@ -74,6 +74,26 @@ void main() {
     await tester.pump();
     expect(find.byKey(const ValueKey('tool-arc')), findsNothing);
   });
+
+  testWidgets('the pen tool shows size, color, and dash presets', (
+    tester,
+  ) async {
+    final library = _MemoryLibrary();
+    final note = await library.createNote('笔');
+    await tester.pumpWidget(
+      MaterialApp(home: NotePage(vault: library, note: note)),
+    );
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('钢笔'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('pen-presets')), findsOneWidget);
+    expect(find.text('1.5'), findsOneWidget);
+    expect(find.text('3.0'), findsOneWidget);
+    expect(find.text('6.0'), findsOneWidget);
+    expect(find.text('设置'), findsNothing);
+  });
 }
 
 class _MemoryLibrary implements NoteLibrary {

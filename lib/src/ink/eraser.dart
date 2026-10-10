@@ -42,7 +42,8 @@ bool strokeHitsEraser(
       Offset(end.x, end.y),
       eraser,
       radius + pad,
-    )) {
+    ) &&
+        !end.gap) {
       return true;
     }
   }
@@ -107,6 +108,8 @@ List<StrokeObject>? eraseRegion(
           baseWidth: stroke.baseWidth,
           points: run,
           finalized: true,
+          dashCycle: stroke.dashCycle,
+          dashRatio: stroke.dashRatio,
         ),
   ];
 }
@@ -138,12 +141,13 @@ _Hit _hits(List<StrokePoint> points, List<Offset> eraser, double radius) {
     final start = points[index];
     final end = points[index + 1];
     final reach = radius + (start.width + end.width) / 4;
-    if (_segmentHitsEraser(
-      Offset(start.x, start.y),
-      Offset(end.x, end.y),
-      eraser,
-      reach,
-    )) {
+    if (!end.gap &&
+        _segmentHitsEraser(
+          Offset(start.x, start.y),
+          Offset(end.x, end.y),
+          eraser,
+          reach,
+        )) {
       cutAfter[index] = true;
       hit = true;
     }

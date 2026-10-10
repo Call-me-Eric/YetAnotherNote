@@ -28,6 +28,7 @@ class StrokePoint {
     required this.pressure,
     this.azimuth,
     this.altitude,
+    this.gap = false,
   });
 
   final double x;
@@ -40,6 +41,9 @@ class StrokePoint {
   final double? azimuth;
   final double? altitude;
 
+  /// When true, this point starts a new run and is not joined to the previous point.
+  final bool gap;
+
   StrokePoint copyWith({double? x, double? y, double? width, double? height}) {
     return StrokePoint(
       x: x ?? this.x,
@@ -51,6 +55,7 @@ class StrokePoint {
       pressure: pressure,
       azimuth: azimuth,
       altitude: altitude,
+      gap: gap,
     );
   }
 
@@ -64,6 +69,7 @@ class StrokePoint {
     'pressure': pressure,
     'azimuth': ?azimuth,
     'altitude': ?altitude,
+    if (gap) 'gap': true,
   };
 
   factory StrokePoint.fromJson(Map<String, Object?> json) {
@@ -77,6 +83,7 @@ class StrokePoint {
       pressure: (json['pressure']! as num).toDouble(),
       azimuth: (json['azimuth'] as num?)?.toDouble(),
       altitude: (json['altitude'] as num?)?.toDouble(),
+      gap: json['gap'] == true,
     );
   }
 }
@@ -89,6 +96,8 @@ class StrokeObject {
     required this.baseWidth,
     required this.points,
     required this.finalized,
+    this.dashCycle = 24,
+    this.dashRatio = 1,
   });
 
   final String id;
@@ -98,6 +107,12 @@ class StrokeObject {
   final List<StrokePoint> points;
   final bool finalized;
 
+  /// Length of one dash repeat, in points. Ignored when [dashRatio] is 1.
+  final double dashCycle;
+
+  /// Fraction of each repeat that is drawn. 1 is a solid line.
+  final double dashRatio;
+
   StrokeObject copyWith({List<StrokePoint>? points, bool? finalized}) {
     return StrokeObject(
       id: id,
@@ -106,6 +121,8 @@ class StrokeObject {
       baseWidth: baseWidth,
       points: points ?? this.points,
       finalized: finalized ?? this.finalized,
+      dashCycle: dashCycle,
+      dashRatio: dashRatio,
     );
   }
 
@@ -116,6 +133,8 @@ class StrokeObject {
     'color': color,
     'baseWidth': baseWidth,
     'finalized': finalized,
+    'dashCycle': dashCycle,
+    'dashRatio': dashRatio,
     'points': [for (final point in points) point.toJson()],
   };
 
@@ -130,6 +149,8 @@ class StrokeObject {
           StrokePoint.fromJson((point as Map).cast<String, Object?>()),
       ],
       finalized: json['finalized'] as bool? ?? false,
+      dashCycle: (json['dashCycle'] as num?)?.toDouble() ?? 24,
+      dashRatio: (json['dashRatio'] as num?)?.toDouble() ?? 1,
     );
   }
 }
@@ -764,6 +785,10 @@ double _pressureOf(PointerEvent event) {
 }
 
 void paintStroke(Canvas canvas, StrokeObject stroke) {
+  if (stroke.tool == 'fixed') {
+    _paintFixed(canvas, stroke);
+    return;
+  }
   final paint = Paint()
     ..color = Color(stroke.color)
     ..strokeCap = StrokeCap.round
@@ -773,7 +798,11 @@ void paintStroke(Canvas canvas, StrokeObject stroke) {
   if (points.isEmpty) {
     return;
   }
+  final solid = stroke.dashRatio >= 0.999 || stroke.dashCycle <= 0;
   if (points.length == 1) {
+    if (!solid && stroke.dashRatio <= 0) {
+      return;
+    }
     canvas.drawCircle(
       Offset(points.single.x, points.single.y),
       points.single.width / 2,
@@ -782,15 +811,118 @@ void paintStroke(Canvas canvas, StrokeObject stroke) {
     return;
   }
   paint.style = PaintingStyle.stroke;
-  for (var index = 0; index < points.length - 1; index++) {
-    final start = points[index];
-    final end = points[index + 1];
+  _paintIsolated(canvas, paint, points);
+  if (solid) {
+    for (var index = 0; index < points.length - 1; index++) {
+      final start = points[index];
+      final end = points[index + 1];
+    if (points[index + 1].gap) {
+      continue;
+    }
     canvas.drawLine(
       Offset(start.x, start.y),
       Offset(end.x, end.y),
       paint..strokeWidth = (start.width + end.width) / 2,
     );
+    }
+    return;
   }
+  paint
+    ..strokeCap = StrokeCap.butt
+    ..strokeJoin = StrokeJoin.bevel;
+  final cycle = stroke.dashCycle;
+  final on = cycle * stroke.dashRatio.clamp(0.0, 1.0);
+  if (on <= 0) {
+    return;
+  }
+  var traveled = 0.0;
+  for (var index = 0; index < points.length - 1; index++) {
+    final start = points[index];
+    final end = points[index + 1];
+    if (end.gap) {
+      continue;
+    }
+    paint.strokeWidth = (start.width + end.width) / 2;
+    final length = _hypot(end.x - start.x, end.y - start.y);
+    if (length == 0) {
+      continue;
+    }
+    var local = 0.0;
+    while (local < length - 0.001) {
+      final into = (traveled + local) % cycle;
+      final drawing = into < on;
+      final remain = drawing ? on - into : cycle - into;
+      final step = math.min(math.max(remain, 0.001), length - local);
+      if (drawing) {
+        final from = local / length;
+        final to = math.min(1.0, (local + step) / length);
+        canvas.drawLine(
+          Offset(
+            start.x + (end.x - start.x) * from,
+            start.y + (end.y - start.y) * from,
+          ),
+          Offset(
+            start.x + (end.x - start.x) * to,
+            start.y + (end.y - start.y) * to,
+          ),
+          paint,
+        );
+      }
+      local += step;
+    }
+    traveled += length;
+  }
+}
+
+void _paintFixed(Canvas canvas, StrokeObject stroke, {Paint? paint}) {
+  final fill = Paint()
+    ..color = paint?.color ?? Color(stroke.color)
+    ..blendMode = paint?.blendMode ?? BlendMode.srcOver
+    ..isAntiAlias = false
+    ..style = PaintingStyle.fill;
+  final points = stroke.points;
+  var index = 0;
+  while (index < points.length) {
+    final start = points[index];
+    if (index + 1 < points.length && !points[index + 1].gap) {
+      final end = points[index + 1];
+      final height = start.height;
+      final left = math.min(start.x, end.x) - height / 2;
+      final right = math.max(start.x, end.x) + height / 2;
+      canvas.drawRect(
+        Rect.fromLTRB(left, start.y - height / 2, right, start.y + height / 2),
+        fill,
+      );
+      index += 2;
+      continue;
+    }
+    canvas.drawRect(
+      Rect.fromCenter(
+        center: Offset(start.x, start.y),
+        width: start.width,
+        height: start.height,
+      ),
+      fill,
+    );
+    index += 1;
+  }
+}
+
+void _paintIsolated(Canvas canvas, Paint paint, List<StrokePoint> points) {
+  for (var index = 0; index < points.length; index++) {
+    final point = points[index];
+    final starts = index == 0 || point.gap;
+    final ends = index == points.length - 1 || points[index + 1].gap;
+    if (!starts || !ends) {
+      continue;
+    }
+    canvas.drawCircle(
+      Offset(point.x, point.y),
+      point.width / 2,
+      paint..style = PaintingStyle.fill,
+    );
+  }
+  paint.style = PaintingStyle.stroke;
 }
 
 /// Draws a round stroke slightly wider than [paintStroke], so a wash or a cut covers the ink edge as well as the center.
@@ -800,6 +932,10 @@ void paintStrokeCover(
   Paint paint, {
   double pad = 0,
 }) {
+  if (stroke.tool == 'fixed') {
+    _paintFixed(canvas, stroke, paint: paint);
+    return;
+  }
   final points = stroke.points;
   if (points.isEmpty) {
     return;
@@ -820,6 +956,9 @@ void paintStrokeCover(
   for (var index = 0; index < points.length - 1; index++) {
     final start = points[index];
     final end = points[index + 1];
+    if (end.gap) {
+      continue;
+    }
     canvas.drawLine(
       Offset(start.x, start.y),
       Offset(end.x, end.y),
