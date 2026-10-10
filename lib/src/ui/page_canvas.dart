@@ -10,6 +10,8 @@ import '../ink/eraser.dart';
 import '../ink/stroke.dart';
 import '../ink/text_box.dart';
 import '../input/finger.dart';
+import '../input/stylus_feedback.dart';
+import 'selection_frame.dart';
 import 'text_box_view.dart';
 import '../storage/note_document.dart';
 
@@ -25,6 +27,26 @@ class InkPatch {
   final Rect bounds;
   final void Function(Canvas canvas) paint;
   final VoidCallback? onApplied;
+}
+
+final _idleSelection = ValueNotifier<SelectionPreview?>(null);
+
+class SelectionPreview {
+  const SelectionPreview({
+    required this.strokes,
+    required this.bounds,
+    this.outline = const [],
+    this.image,
+    this.imageRect,
+    this.transform,
+  });
+
+  final List<StrokeObject> strokes;
+  final Rect bounds;
+  final List<Offset> outline;
+  final ui.Image? image;
+  final Rect? imageRect;
+  final Float64List? transform;
 }
 
 class StrokeFade {
@@ -72,6 +94,26 @@ class PageCanvas extends StatelessWidget {
     this.viewScale = 1,
     this.preview,
     this.previewPageId,
+    this.eraserRadius = 14,
+    this.penWidth = 3,
+    this.lassoPoints = const [],
+    this.lassoOutline = const [],
+    this.lassoRect,
+    this.selectionBounds,
+    this.selectionInk = const [],
+    this.onLassoStart,
+    this.onLassoMove,
+    this.onLassoEnd,
+    this.onSelectionMove,
+    this.onSelectionMoveEnd,
+    this.onSelectionScale,
+    this.onSelectionScaleEnd,
+    this.onSelectionRotate,
+    this.onSelectionRotateEnd,
+    this.onSelectionMenu,
+    this.onSelectionClear,
+    this.selectionHaptic = false,
+    required this.selectionLive,
     required this.live,
     super.key,
   });
@@ -113,6 +155,26 @@ class PageCanvas extends StatelessWidget {
   final double viewScale;
   final StrokeObject? preview;
   final String? previewPageId;
+  final double eraserRadius;
+  final double penWidth;
+  final List<Offset> lassoPoints;
+  final List<Offset> lassoOutline;
+  final Rect? lassoRect;
+  final Rect? selectionBounds;
+  final List<StrokeObject> selectionInk;
+  final void Function(String pageId, Offset point)? onLassoStart;
+  final void Function(String pageId, Offset point)? onLassoMove;
+  final void Function(String pageId, Offset point)? onLassoEnd;
+  final void Function(Offset delta)? onSelectionMove;
+  final VoidCallback? onSelectionMoveEnd;
+  final void Function(SelectionHandle handle, Offset delta)? onSelectionScale;
+  final VoidCallback? onSelectionScaleEnd;
+  final void Function(Offset pointer)? onSelectionRotate;
+  final VoidCallback? onSelectionRotateEnd;
+  final VoidCallback? onSelectionMenu;
+  final VoidCallback? onSelectionClear;
+  final bool selectionHaptic;
+  final ValueListenable<SelectionPreview?> selectionLive;
   final ValueListenable<({String pageId, StrokeObject stroke})?> live;
 
   static const pageGap = 32.0;
@@ -176,6 +238,36 @@ class PageCanvas extends StatelessWidget {
                 onTextHover: onTextHover,
                 onTip: onTip,
                 viewScale: viewScale,
+                eraserRadius: eraserRadius,
+                penWidth: penWidth,
+                lassoPoints: pages[index].id == selectedPageId
+                    ? lassoPoints
+                    : const [],
+                lassoOutline: pages[index].id == selectedPageId
+                    ? lassoOutline
+                    : const [],
+                selectionHaptic: selectionHaptic,
+                lassoRect: pages[index].id == selectedPageId ? lassoRect : null,
+                selectionBounds: pages[index].id == selectedPageId
+                    ? selectionBounds
+                    : null,
+                selectionInk: pages[index].id == selectedPageId
+                    ? selectionInk
+                    : const [],
+                onLassoStart: onLassoStart,
+                onLassoMove: onLassoMove,
+                onLassoEnd: onLassoEnd,
+                onSelectionMove: onSelectionMove,
+                onSelectionMoveEnd: onSelectionMoveEnd,
+                onSelectionScale: onSelectionScale,
+                onSelectionScaleEnd: onSelectionScaleEnd,
+                onSelectionRotate: onSelectionRotate,
+                onSelectionRotateEnd: onSelectionRotateEnd,
+                onSelectionMenu: onSelectionMenu,
+                onSelectionClear: onSelectionClear,
+                selectionLive: pages[index].id == selectedPageId
+                    ? selectionLive
+                    : _idleSelection,
               ),
             ],
           ],
@@ -221,6 +313,26 @@ class _PageSheet extends StatefulWidget {
     this.onTextHover,
     this.onTip,
     this.viewScale = 1,
+    this.eraserRadius = 14,
+    this.penWidth = 3,
+    this.lassoPoints = const [],
+    this.lassoOutline = const [],
+    this.lassoRect,
+    this.selectionBounds,
+    this.selectionInk = const [],
+    this.onLassoStart,
+    this.onLassoMove,
+    this.onLassoEnd,
+    this.onSelectionMove,
+    this.onSelectionMoveEnd,
+    this.onSelectionScale,
+    this.onSelectionScaleEnd,
+    this.onSelectionRotate,
+    this.onSelectionRotateEnd,
+    this.onSelectionMenu,
+    this.onSelectionClear,
+    this.selectionHaptic = false,
+    required this.selectionLive,
   });
 
   final PageFile page;
@@ -258,6 +370,26 @@ class _PageSheet extends StatefulWidget {
   onTextHover;
   final ValueChanged<Offset?>? onTip;
   final double viewScale;
+  final double eraserRadius;
+  final double penWidth;
+  final List<Offset> lassoPoints;
+  final List<Offset> lassoOutline;
+  final Rect? lassoRect;
+  final Rect? selectionBounds;
+  final List<StrokeObject> selectionInk;
+  final void Function(String pageId, Offset point)? onLassoStart;
+  final void Function(String pageId, Offset point)? onLassoMove;
+  final void Function(String pageId, Offset point)? onLassoEnd;
+  final void Function(Offset delta)? onSelectionMove;
+  final VoidCallback? onSelectionMoveEnd;
+  final void Function(SelectionHandle handle, Offset delta)? onSelectionScale;
+  final VoidCallback? onSelectionScaleEnd;
+  final void Function(Offset pointer)? onSelectionRotate;
+  final VoidCallback? onSelectionRotateEnd;
+  final VoidCallback? onSelectionMenu;
+  final VoidCallback? onSelectionClear;
+  final bool selectionHaptic;
+  final ValueListenable<SelectionPreview?> selectionLive;
 
   @override
   State<_PageSheet> createState() => _PageSheetState();
@@ -280,6 +412,12 @@ class _PageSheetState extends State<_PageSheet> {
   var _rubberReady = false;
   final Map<String, StrokeObject> _finalStrokes = {};
   final ValueNotifier<Offset?> _cursor = ValueNotifier(null);
+  var _tipDown = false;
+  int? _outsidePointer;
+  Offset? _lassoHapticAt;
+  var _hapticRun = 0.0;
+  Offset? _outsideDown;
+  Duration? _outsideStamp;
 
   @override
   void dispose() {
@@ -313,6 +451,30 @@ class _PageSheetState extends State<_PageSheet> {
           if (!_inside(event.localPosition)) {
             return;
           }
+          if (_hitsSelection(event.localPosition)) {
+            widget.onSuppressPan(event.pointer);
+            widget.onSelect();
+            _outsidePointer = null;
+            return;
+          }
+          if (widget.selectionBounds != null && !drawsInk(event.kind)) {
+            _outsidePointer = event.pointer;
+            _outsideDown = event.localPosition;
+            _outsideStamp = event.timeStamp;
+          } else {
+            _outsidePointer = null;
+          }
+          if (widget.tool == InkTool.lasso) {
+            if (!drawsInk(event.kind)) {
+              return;
+            }
+            _inkPointer = event.pointer;
+            _lassoHapticAt = event.localPosition;
+            _hapticRun = 0;
+            widget.onSelect();
+            widget.onLassoStart?.call(widget.page.id, event.localPosition);
+            return;
+          }
           if (widget.tool == InkTool.text && _textPointerKind(event.kind)) {
             _beginText(event);
             return;
@@ -331,12 +493,32 @@ class _PageSheetState extends State<_PageSheet> {
           widget.onEraseStart(widget.page.id, event.localPosition);
         },
         onPointerMove: (event) {
+          if (event.pointer == _outsidePointer && _outsideDown != null) {
+            if ((event.localPosition - _outsideDown!).distance > fingerSlop) {
+              _outsidePointer = null;
+            }
+          }
           if (event.pointer == _textPointer) {
             _moveText(event.localPosition);
             return;
           }
           if (event.pointer == _inkPointer) {
             _trackTip(event, pressed: true);
+          }
+          if (event.pointer == _inkPointer && widget.tool == InkTool.lasso) {
+            final previous = _lassoHapticAt;
+            _lassoHapticAt = event.localPosition;
+            if (widget.selectionHaptic &&
+                _stylusKind(event.kind) &&
+                previous != null) {
+              _hapticRun += (event.localPosition - previous).distance;
+              if (_hapticRun >= 16) {
+                _hapticRun = 0;
+                selectionHaptic(event.position);
+              }
+            }
+            widget.onLassoMove?.call(widget.page.id, event.localPosition);
+            return;
           }
           if (!drawsInk(event.kind) || !_inside(event.localPosition)) {
             return;
@@ -348,13 +530,21 @@ class _PageSheetState extends State<_PageSheet> {
           widget.onEraseMove(widget.page.id, event.localPosition);
         },
         onPointerUp: (event) {
+          _finishOutside(event);
           if (event.pointer == _textPointer) {
             _endText();
+            return;
+          }
+          if (event.pointer == _inkPointer && widget.tool == InkTool.lasso) {
+            widget.onLassoEnd?.call(widget.page.id, event.localPosition);
+            _inkPointer = null;
+            _lassoHapticAt = null;
             return;
           }
           _finishPointer(event.pointer, event.kind);
         },
         onPointerCancel: (event) {
+          _outsidePointer = null;
           if (event.pointer == _textPointer) {
             _cancelText();
             return;
@@ -455,6 +645,39 @@ class _PageSheetState extends State<_PageSheet> {
                       ),
                     ),
                   Positioned.fill(
+                    child: IgnorePointer(
+                      child: CustomPaint(
+                        painter: _LassoPainter(
+                          points: widget.lassoPoints,
+                          rect: widget.lassoRect,
+                        ),
+                      ),
+                    ),
+                  ),
+                  Positioned.fill(
+                    child: ValueListenableBuilder<SelectionPreview?>(
+                      valueListenable: widget.selectionLive,
+                      builder: (context, live, _) {
+                        final ink = live?.strokes ?? const <StrokeObject>[];
+                        final outline = live?.outline ?? widget.lassoOutline;
+                        if (ink.isEmpty && outline.length < 2) {
+                          return const SizedBox.shrink();
+                        }
+                        return IgnorePointer(
+                          child: CustomPaint(
+                            painter: _SelectionMarkPainter(
+                              strokes: ink,
+                              outline: outline,
+                              image: live?.image,
+                              imageRect: live?.imageRect,
+                              transform: live?.transform,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  Positioned.fill(
                     child: TextBoxLayer(
                       boxes: widget.textBoxes,
                       pageWidth: widget.page.width,
@@ -471,14 +694,42 @@ class _PageSheetState extends State<_PageSheet> {
                       onResizeDown: widget.onSuppressPan,
                     ),
                   ),
+                  Positioned.fill(
+                    child: ValueListenableBuilder<SelectionPreview?>(
+                      valueListenable: widget.selectionLive,
+                      builder: (context, live, _) {
+                        final bounds = live?.bounds ?? widget.selectionBounds;
+                        if (bounds == null) {
+                          return const SizedBox.shrink();
+                        }
+                        return SelectionFrame(
+                          key: const ValueKey('selection-frame'),
+                          bounds: bounds,
+                          onMove: (delta) => widget.onSelectionMove?.call(delta),
+                          onMoveEnd: () => widget.onSelectionMoveEnd?.call(),
+                          onScale: (handle, delta) =>
+                              widget.onSelectionScale?.call(handle, delta),
+                          onScaleEnd: () => widget.onSelectionScaleEnd?.call(),
+                          onRotate: (pointer) =>
+                              widget.onSelectionRotate?.call(pointer),
+                          onRotateEnd: () => widget.onSelectionRotateEnd?.call(),
+                          onMenu: () => widget.onSelectionMenu?.call(),
+                        );
+                      },
+                    ),
+                  ),
                   ValueListenableBuilder<Offset?>(
                     valueListenable: _cursor,
                     builder: (context, cursor, _) {
                       if (cursor == null || widget.tool == InkTool.text) {
                         return const SizedBox.shrink();
                       }
-                      final eraser = widget.tool != InkTool.pen;
-                      final radius = eraser ? eraserRadius : 4.5;
+                      final eraser =
+                          widget.tool == InkTool.objectEraser ||
+                          widget.tool == InkTool.regionEraser;
+                      final radius = eraser
+                          ? widget.eraserRadius
+                          : widget.penWidth / 2;
                       const pad = 2.0;
                       final side = (radius + pad) * 2;
                       return Positioned(
@@ -492,6 +743,8 @@ class _PageSheetState extends State<_PageSheet> {
                               painter: _TipPainter(
                                 Offset(radius + pad, radius + pad),
                                 eraser: eraser,
+                                radius: radius,
+                                opaque: _tipDown,
                               ),
                               size: Size(side, side),
                             ),
@@ -658,7 +911,8 @@ class _PageSheetState extends State<_PageSheet> {
   }
 
   void _trackTip(PointerEvent event, {required bool pressed}) {
-    if (widget.tool == InkTool.text) {
+    _tipDown = pressed;
+    if (widget.tool == InkTool.text || widget.tool == InkTool.lasso) {
       _cursor.value = null;
       widget.onTip?.call(event.position);
       widget.onTextHover?.call(
@@ -668,7 +922,9 @@ class _PageSheetState extends State<_PageSheet> {
       );
       return;
     }
-    final eraser = widget.tool != InkTool.pen;
+    final eraser =
+        widget.tool == InkTool.objectEraser ||
+        widget.tool == InkTool.regionEraser;
     if (eraser) {
       _cursor.value = event.localPosition;
     } else if (!pressed && _inside(event.localPosition)) {
@@ -697,6 +953,30 @@ class _PageSheetState extends State<_PageSheet> {
       _inkPointer = null;
       _clearTip();
     }
+  }
+
+  void _finishOutside(PointerEvent event) {
+    if (event.pointer != _outsidePointer || _outsideStamp == null) {
+      return;
+    }
+    final elapsed = event.timeStamp - _outsideStamp!;
+    _outsidePointer = null;
+    if (elapsed < fingerLongPress) {
+      widget.onSelectionClear?.call();
+    }
+  }
+
+  bool _hitsSelection(Offset point) {
+    final bounds = widget.selectionLive.value?.bounds ?? widget.selectionBounds;
+    if (bounds == null) {
+      return false;
+    }
+    if (bounds.inflate(20).contains(point)) {
+      return true;
+    }
+    final stem = 16 + bounds.shortestSide * 0.12;
+    final knob = Offset(bounds.center.dx, bounds.top - stem);
+    return (point - knob).distance <= 22;
   }
 
   bool _inside(Offset point) {
@@ -759,37 +1039,149 @@ class _PageSheetState extends State<_PageSheet> {
   }
 }
 
-class _TipPainter extends CustomPainter {
-  const _TipPainter(this.center, {required this.eraser});
+class _SelectionMarkPainter extends CustomPainter {
+  const _SelectionMarkPainter({
+    required this.strokes,
+    required this.outline,
+    this.image,
+    this.imageRect,
+    this.transform,
+  });
 
-  final Offset center;
-  final bool eraser;
+  final List<StrokeObject> strokes;
+  final List<Offset> outline;
+  final ui.Image? image;
+  final Rect? imageRect;
+  final Float64List? transform;
 
   @override
   void paint(Canvas canvas, Size size) {
+    final matrix = transform;
+    if (matrix != null) {
+      canvas.save();
+      canvas.transform(matrix);
+    }
+    final shot = image;
+    final rect = imageRect;
+    if (shot != null && rect != null) {
+      canvas.drawImageRect(
+        shot,
+        Rect.fromLTWH(0, 0, shot.width.toDouble(), shot.height.toDouble()),
+        rect,
+        Paint()..filterQuality = FilterQuality.medium,
+      );
+    } else {
+      for (final stroke in strokes) {
+        paintStroke(canvas, stroke);
+      }
+      if (outline.length >= 2) {
+        final path = Path()..moveTo(outline.first.dx, outline.first.dy);
+        for (final point in outline.skip(1)) {
+          path.lineTo(point.dx, point.dy);
+        }
+        path.close();
+        _drawDashed(canvas, path, _selectionBlue);
+      }
+    }
+    if (matrix != null) {
+      canvas.restore();
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _SelectionMarkPainter oldDelegate) => true;
+}
+
+bool _stylusKind(PointerDeviceKind kind) {
+  return kind == PointerDeviceKind.stylus ||
+      kind == PointerDeviceKind.invertedStylus;
+}
+
+const _selectionBlue = Color(0xFF3D7EFF);
+
+void _drawDashed(Canvas canvas, Path source, Color color) {
+  final paint = Paint()
+    ..style = PaintingStyle.stroke
+    ..strokeWidth = 1.4
+    ..color = color;
+  for (final metric in source.computeMetrics()) {
+    var distance = 0.0;
+    while (distance < metric.length) {
+      final next = math.min(distance + 6, metric.length);
+      canvas.drawPath(metric.extractPath(distance, next), paint);
+      distance = next + 4;
+    }
+  }
+}
+
+class _LassoPainter extends CustomPainter {
+  const _LassoPainter({required this.points, required this.rect});
+
+  final List<Offset> points;
+  final Rect? rect;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (rect != null && !rect!.isEmpty) {
+      _drawDashed(canvas, Path()..addRect(rect!), _selectionBlue);
+    }
+    if (points.length >= 2) {
+      final path = Path()..moveTo(points.first.dx, points.first.dy);
+      for (final point in points.skip(1)) {
+        path.lineTo(point.dx, point.dy);
+      }
+      _drawDashed(canvas, path, _selectionBlue);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _LassoPainter oldDelegate) => true;
+}
+
+class _TipPainter extends CustomPainter {
+  const _TipPainter(
+    this.center, {
+    required this.eraser,
+    required this.radius,
+    required this.opaque,
+  });
+
+  final Offset center;
+  final bool eraser;
+  final double radius;
+  final bool opaque;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final alpha = opaque || !eraser ? 1.0 : 0.35;
     if (eraser) {
       canvas.drawCircle(
         center,
-        eraserRadius,
-        Paint()..color = const Color(0xFFFFFFFF),
+        radius,
+        Paint()..color = const Color(0xFFFFFFFF).withValues(alpha: alpha),
       );
       canvas.drawCircle(
         center,
-        eraserRadius - 0.75,
+        radius - 0.75,
         Paint()
-          ..color = const Color(0xFF000000)
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.5,
+          ..strokeWidth = 1.5
+          ..color = const Color(0xFF000000).withValues(alpha: alpha),
       );
       return;
     }
-    canvas.drawCircle(center, 4.5, Paint()..color = const Color(0xFFFFFFFF));
-    canvas.drawCircle(center, 2.4, Paint()..color = const Color(0xFF000000));
+    canvas.drawCircle(
+      center,
+      radius,
+      Paint()..color = const Color(0xFF222222),
+    );
   }
 
   @override
   bool shouldRepaint(covariant _TipPainter oldDelegate) =>
-      oldDelegate.center != center || oldDelegate.eraser != eraser;
+      oldDelegate.center != center ||
+      oldDelegate.opaque != opaque ||
+      oldDelegate.radius != radius;
 }
 
 class _FadePainter extends CustomPainter {

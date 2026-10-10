@@ -28,7 +28,16 @@ final class ApplePencilSideButton {
   private var squeezeRelay: AnyObject?
 
   func register(messenger: FlutterBinaryMessenger) {
-    channel = FlutterMethodChannel(name: "dev.yetanotherpage/stylus", binaryMessenger: messenger)
+    let channel = FlutterMethodChannel(name: "dev.yetanotherpage/stylus", binaryMessenger: messenger)
+    self.channel = channel
+    channel.setMethodCallHandler { call, result in
+      if call.method == "selectionHaptic" {
+        ApplePencilSideButton.playSelectionHaptic(call.arguments)
+        result(nil)
+        return
+      }
+      result(FlutterMethodNotImplemented)
+    }
     NotificationCenter.default.addObserver(
       forName: UIApplication.didBecomeActiveNotification,
       object: nil,
@@ -49,18 +58,38 @@ final class ApplePencilSideButton {
 
   func attach(window: UIWindow?) {
     guard let view = window?.rootViewController?.view else { return }
-    guard #available(iOS 17.5, *) else { return }
     if view.interactions.contains(where: { $0 is UIPencilInteraction }) { return }
-    let relay = PencilSqueezeRelay()
+    let relay = PencilRelay()
     squeezeRelay = relay
     let interaction = UIPencilInteraction()
     interaction.delegate = relay
     view.addInteraction(interaction)
   }
+
+  static func playSelectionHaptic(_ arguments: Any?) {
+    guard #available(iOS 17.5, *) else { return }
+    let point = hapticPoint(arguments)
+    let generator = UICanvasFeedbackGenerator()
+    generator.prepare()
+    generator.alignmentOccurred(at: point)
+  }
+
+  private static func hapticPoint(_ arguments: Any?) -> CGPoint {
+    guard let map = arguments as? [String: Any],
+          let x = map["x"] as? Double,
+          let y = map["y"] as? Double else {
+      return .zero
+    }
+    return CGPoint(x: x, y: y)
+  }
 }
 
-@available(iOS 17.5, *)
-final class PencilSqueezeRelay: NSObject, UIPencilInteractionDelegate {
+final class PencilRelay: NSObject, UIPencilInteractionDelegate {
+  func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
+    ApplePencilSideButton.shared.channel?.invokeMethod("doubleTap", arguments: nil)
+  }
+
+  @available(iOS 17.5, *)
   func pencilInteraction(
     _ interaction: UIPencilInteraction,
     didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze

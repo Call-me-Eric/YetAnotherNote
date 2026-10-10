@@ -22,16 +22,35 @@ typedef StylusSideButtonListener = void Function(Offset? globalPosition);
 /// Receives [StylusSideButton.reportMethod] from the current platform.
 class ChannelStylusSideButton implements StylusSideButton {
   final List<StylusSideButtonListener> _listeners = [];
+  final List<VoidCallback> _doubleTaps = [];
 
   void attachPlatform() {
     const MethodChannel(
       StylusSideButton.channelName,
     ).setMethodCallHandler((call) async {
-      if (call.method != StylusSideButton.reportMethod) {
+      if (call.method == StylusSideButton.reportMethod) {
+        report(_position(call.arguments));
         return;
       }
-      report(_position(call.arguments));
+      if (call.method == 'doubleTap') {
+        reportDoubleTap();
+      }
     });
+  }
+
+  void addDoubleTapListener(VoidCallback listener) {
+    _doubleTaps.add(listener);
+  }
+
+  void removeDoubleTapListener(VoidCallback listener) {
+    _doubleTaps.remove(listener);
+  }
+
+  void reportDoubleTap() {
+    if (_doubleTaps.isEmpty) {
+      return;
+    }
+    _doubleTaps.last();
   }
 
   @override

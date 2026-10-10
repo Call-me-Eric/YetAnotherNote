@@ -59,20 +59,39 @@ void main() {
     stylusSideButton.report(const Offset(240, 320));
     await tester.pump();
     expect(find.byKey(const ValueKey('tool-arc')), findsOneWidget);
+    expect(find.byKey(const ValueKey('pen-preset-arc')), findsOneWidget);
     expect(find.byKey(const ValueKey('arc-pen')), findsOneWidget);
-    expect(find.byKey(const ValueKey('arc-region-eraser')), findsOneWidget);
+    expect(find.byKey(const ValueKey('arc-eraser')), findsOneWidget);
+    expect(find.byKey(const ValueKey('arc-lasso')), findsOneWidget);
+    expect(find.byKey(const ValueKey('arc-paste')), findsOneWidget);
     expect(find.byKey(const ValueKey('arc-redo')), findsOneWidget);
+    expect(find.byKey(const ValueKey('arc-region-eraser')), findsNothing);
 
-    await tester.tap(find.byKey(const ValueKey('arc-object-eraser')));
-    await tester.pump();
-    expect(find.byKey(const ValueKey('tool-arc')), findsNothing);
-
-    stylusSideButton.report(null);
+    await tester.tap(find.byKey(const ValueKey('arc-text')));
     await tester.pump();
     expect(find.byKey(const ValueKey('tool-arc')), findsOneWidget);
+    expect(find.byKey(const ValueKey('pen-preset-arc')), findsNothing);
     stylusSideButton.report(const Offset(240, 320));
     await tester.pump();
     expect(find.byKey(const ValueKey('tool-arc')), findsNothing);
+
+    await tester.tap(find.byTooltip('钢笔'));
+    await tester.pump();
+    stylusSideButton.report(const Offset(240, 320));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('tool-arc')), findsOneWidget);
+    expect(find.byKey(const ValueKey('pen-preset-arc')), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('arc-eraser')));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('tool-arc')), findsOneWidget);
+    expect(find.byKey(const ValueKey('pen-preset-arc')), findsNothing);
+    expect(find.byKey(const ValueKey('eraser-options')), findsOneWidget);
+
+    stylusSideButton.report(const Offset(240, 320));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('tool-arc')), findsNothing);
+    expect(find.byKey(const ValueKey('eraser-options')), findsNothing);
   });
 
   testWidgets('the pen tool shows size, color, and dash presets', (

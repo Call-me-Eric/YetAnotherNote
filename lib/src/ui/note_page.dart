@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -8,15 +9,18 @@ import '../ids.dart';
 import '../ink/eraser.dart';
 import '../ink/fix_text.dart';
 import '../ink/pen_palette.dart';
+import '../ink/selection.dart';
 import '../ink/stroke.dart';
 import '../ink/text_box.dart';
 import '../input/finger.dart';
+import '../input/stylus_preferences.dart';
 import '../input/stylus_side_button.dart';
 import '../storage/note_document.dart';
 import '../storage/vault.dart';
 import 'layer_panel.dart';
 import 'page_canvas.dart';
 import 'pen_settings.dart';
+import 'selection_frame.dart';
 import 'settings_page.dart';
 import 'title_dialog.dart';
 import 'tool_arc.dart';
@@ -73,6 +77,42 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
   final Map<String, TextBox> _gestureBefore = {};
   String? _eraserPageId;
   String? _eraserLayerId;
+  EraserKind _eraserKind = EraserKind.stroke;
+  double _eraserRadius = 14;
+  var _eraserBarOpen = false;
+  LassoShape _lassoShape = LassoShape.free;
+  final Set<LassoTarget> _lassoTargets = {
+    LassoTarget.stroke,
+    LassoTarget.text,
+    LassoTarget.highlighter,
+  };
+  var _lassoBarOpen = false;
+  String? _lassoPageId;
+  List<Offset> _lassoPoints = const [];
+  List<Offset> _lassoOutline = const [];
+  List<Offset>? _gestureOutline;
+  StylusPreferences _stylus = StylusPreferences.initial;
+  InkTool? _toolBeforeEraser;
+  var _selectionMenuOpen = false;
+  Rect? _lassoRect;
+  String? _selectionPageId;
+  String? _selectionLayerId;
+  List<StrokeObject> _selectedStrokes = const [];
+  List<TextBox> _selectedTexts = const [];
+  Rect? _selectionBounds;
+  List<StrokeObject>? _gestureStrokes;
+  List<TextBox>? _gestureTexts;
+  var _selectionDirty = false;
+  Offset? _rotateLast;
+  final ValueNotifier<SelectionPreview?> _selectionLive = ValueNotifier(null);
+  Offset? _gestureCenter;
+  Offset? _rotateOrigin;
+  Rect? _gestureBounds;
+  Matrix4? _gestureMatrix;
+  ui.Image? _gestureImage;
+  Rect? _gestureImageRect;
+  var _gestureEpoch = 0;
+  OverlayEntry? _optionsArc;
   Offset? _tip;
   OverlayEntry? _arc;
   OverlayEntry? _presetArc;
@@ -90,9 +130,15 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     _selectedPageId = widget.note.pages.first.id;
     _transform = TransformationController();
     stylusSideButton.addListener(_toggleArc);
+    stylusSideButton.addDoubleTapListener(_onDoubleTap);
     final vault = widget.vault;
     if (vault is Vault) {
       final epoch = _penEpoch;
+      vault.readStylusPreferences().then((preferences) {
+        if (mounted) {
+          setState(() => _stylus = preferences);
+        }
+      });
       vault.readPenPalette().then((palette) {
         if (mounted && epoch == _penEpoch) {
           setState(() => _pen = palette);
@@ -107,9 +153,13 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
   @override
   void dispose() {
     stylusSideButton.removeListener(_toggleArc);
+    stylusSideButton.removeDoubleTapListener(_onDoubleTap);
     _inertia?.dispose();
     _arc?.remove();
     _arc = null;
+    _optionsArc?.remove();
+    _optionsArc = null;
+    _selectionLive.dispose();
     _transform.dispose();
     _live.dispose();
     _patches.dispose();
@@ -378,6 +428,9 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
 
   void _startStroke(String pageId, PointerEvent event) {
     _endMoving();
+    if (_selectionBounds != null) {
+      setState(_clearSelection);
+    }
     final page = _note.pages.firstWhere((item) => item.id == pageId);
     final layer = _drawingLayer(page);
     if (layer == null) {
@@ -505,8 +558,570 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     });
   }
 
+  void _lassoStart(String pageId, Offset point) {
+    setState(() {
+      _lassoPageId = pageId;
+      _lassoPoints = [point];
+      _lassoRect = _lassoShape == LassoShape.rect
+          ? Rect.fromPoints(point, point)
+          : null;
+      _clearSelection();
+    });
+  }
+
+  void _lassoMove(String pageId, Offset point) {
+    if (_lassoPageId != pageId || _lassoPoints.isEmpty) {
+      return;
+    }
+    if (_lassoShape == LassoShape.rect) {
+      setState(() {
+        _lassoRect = Rect.fromPoints(_lassoPoints.first, point);
+      });
+      return;
+    }
+    if ((point - _lassoPoints.last).distance < 1.5) {
+      return;
+    }
+    setState(() => _lassoPoints = [..._lassoPoints, point]);
+  }
+
+  void _lassoEnd(String pageId, Offset point) {
+    if (_lassoPageId != pageId) {
+      return;
+    }
+    _lassoMove(pageId, point);
+    final polygon = _lassoShape == LassoShape.free && _lassoPoints.length >= 3
+        ? _lassoPoints
+        : null;
+    final rect = _lassoShape == LassoShape.rect ? _lassoRect : null;
+    final page = _note.pages.where((item) => item.id == pageId);
+    final layer = page.isEmpty ? null : _drawingLayer(page.single);
+    final strokes = <StrokeObject>[];
+    final texts = <TextBox>[];
+    if (layer != null && (polygon != null || (rect != null && !rect.isEmpty))) {
+      for (final stroke in _editableStrokes(page.single, layer.id)) {
+        final highlighter = stroke.tool == 'highlighter';
+        if (highlighter && !_lassoTargets.contains(LassoTarget.highlighter)) {
+          continue;
+        }
+        if (!highlighter && !_lassoTargets.contains(LassoTarget.stroke)) {
+          continue;
+        }
+        if (strokeHitsRegion(stroke, rect: rect, polygon: polygon)) {
+          strokes.add(stroke);
+        }
+      }
+      if (_lassoTargets.contains(LassoTarget.text)) {
+        for (final item in _textBoxes()) {
+          if (item.pageId != pageId) {
+            continue;
+          }
+          if (_layerOfText(item.box.id) != layer.id) {
+            continue;
+          }
+          if (textHitsRegion(item.box, rect: rect, polygon: polygon)) {
+            texts.add(item.box);
+          }
+        }
+      }
+    }
+    setState(() {
+      _lassoPoints = const [];
+      _lassoRect = null;
+      _lassoPageId = null;
+      _selectedStrokes = strokes;
+      _selectedTexts = texts;
+      _selectionPageId = strokes.isEmpty && texts.isEmpty ? null : pageId;
+      _selectionLayerId = strokes.isEmpty && texts.isEmpty ? null : layer?.id;
+      _selectionBounds = strokes.isEmpty && texts.isEmpty
+          ? null
+          : boundsOfObjects(strokes: strokes, texts: texts);
+      _lassoOutline = strokes.isEmpty && texts.isEmpty
+          ? const []
+          : (polygon == null ? const <Offset>[] : List<Offset>.of(polygon));
+    });
+  }
+
+  void _selectionMove(Offset delta) {
+    if (delta == Offset.zero) {
+      return;
+    }
+    _beginSelectionGesture();
+    final shift = Matrix4.translationValues(delta.dx, delta.dy, 0);
+    _gestureMatrix = shift.multiplied(_gestureMatrix!);
+    _publishPreview();
+  }
+
+  void _selectionScale(SelectionHandle handle, Offset delta) {
+    final bounds = _selectionBounds;
+    if (bounds == null || bounds.width < 1 || bounds.height < 1) {
+      return;
+    }
+    _beginSelectionGesture();
+    final scaled = scaleFromHandle(handle, bounds, delta);
+    if (scaled.scaleX == 1 && scaled.scaleY == 1) {
+      return;
+    }
+    final about = Matrix4.identity()
+      ..translate(scaled.origin.dx, scaled.origin.dy)
+      ..scale(scaled.scaleX, scaled.scaleY)
+      ..translate(-scaled.origin.dx, -scaled.origin.dy);
+    _gestureMatrix = about.multiplied(_gestureMatrix!);
+    _publishPreview();
+  }
+
+  void _selectionRotate(Offset pointer) {
+    if (_selectionBounds == null && _gestureCenter == null) {
+      return;
+    }
+    _beginSelectionGesture();
+    _gestureCenter ??= _selectionBounds!.center;
+    _rotateOrigin ??= pointer;
+    final center = _gestureCenter!;
+    final origin = _rotateOrigin!;
+    final start = math.atan2(origin.dy - center.dy, origin.dx - center.dx);
+    final end = math.atan2(pointer.dy - center.dy, pointer.dx - center.dx);
+    if (end == start) {
+      return;
+    }
+    final turns = end - start;
+    final spin = Matrix4.identity()
+      ..translate(center.dx, center.dy)
+      ..rotateZ(turns)
+      ..translate(-center.dx, -center.dy);
+    _gestureMatrix = spin;
+    _publishPreview();
+  }
+
+  void _mirrorSelection({required bool horizontal}) {
+    final bounds = _selectionBounds;
+    if (bounds == null) {
+      return;
+    }
+    _beginSelectionGesture();
+    final center = bounds.center;
+    final mirror = Matrix4.identity();
+    if (horizontal) {
+      mirror
+        ..translate(center.dx, 0.0)
+        ..scale(-1.0, 1.0)
+        ..translate(-center.dx, 0.0);
+    } else {
+      mirror
+        ..translate(0.0, center.dy)
+        ..scale(1.0, -1.0)
+        ..translate(0.0, -center.dy);
+    }
+    _gestureMatrix = mirror;
+    _publishPreview();
+    _finishSelectionGesture();
+  }
+
+  void _beginSelectionGesture() {
+    if (_gestureStrokes != null) {
+      return;
+    }
+    _gestureEpoch++;
+    _gestureStrokes = [
+      for (final stroke in _selectedStrokes) _cloneStroke(stroke),
+    ];
+    _gestureTexts = [for (final box in _selectedTexts) box];
+    _gestureOutline = List<Offset>.of(_lassoOutline);
+    _gestureBounds = _selectionBounds;
+    _gestureMatrix = Matrix4.identity();
+    _captureSelectionImage(_gestureEpoch);
+  }
+
+  Future<void> _captureSelectionImage(int epoch) async {
+    final strokes = _gestureStrokes;
+    final bounds = _gestureBounds;
+    if (strokes == null || bounds == null || bounds.isEmpty) {
+      return;
+    }
+    final pad = bounds.inflate(8);
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    canvas.translate(-pad.left, -pad.top);
+    for (final stroke in strokes) {
+      paintStroke(canvas, stroke);
+    }
+    final outline = _gestureOutline;
+    if (outline != null && outline.length >= 2) {
+      final path = Path()..moveTo(outline.first.dx - pad.left, outline.first.dy - pad.top);
+      for (final point in outline.skip(1)) {
+        path.lineTo(point.dx - pad.left, point.dy - pad.top);
+      }
+      path.close();
+      final paint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.4
+        ..color = const Color(0xFF3D7EFF);
+      for (final metric in path.computeMetrics()) {
+        var distance = 0.0;
+        while (distance < metric.length) {
+          final next = math.min(distance + 6, metric.length);
+          canvas.drawPath(metric.extractPath(distance, next), paint);
+          distance = next + 4;
+        }
+      }
+    }
+    final picture = recorder.endRecording();
+    final dpr = mounted ? MediaQuery.devicePixelRatioOf(context).clamp(1.0, 2.0) : 1.0;
+    var width = math.max(1, (pad.width * dpr).ceil());
+    var height = math.max(1, (pad.height * dpr).ceil());
+    final longest = math.max(width, height);
+    if (longest > 2048) {
+      final fit = 2048 / longest;
+      width = math.max(1, (width * fit).floor());
+      height = math.max(1, (height * fit).floor());
+    }
+    final image = await picture.toImage(width, height);
+    picture.dispose();
+    if (!mounted || epoch != _gestureEpoch) {
+      image.dispose();
+      return;
+    }
+    _gestureImage = image;
+    _gestureImageRect = pad;
+    _publishPreview();
+  }
+
+  void _publishPreview() {
+    final matrix = _gestureMatrix;
+    final source = _gestureBounds;
+    if (matrix == null || source == null) {
+      return;
+    }
+    final bounds = _boundsThrough(matrix, source);
+    _selectionBounds = bounds;
+    final shot = _gestureImage;
+    _selectionLive.value = SelectionPreview(
+      strokes: const [],
+      bounds: bounds,
+      image: shot,
+      imageRect: _gestureImageRect,
+      transform: shot == null ? null : matrix.storage,
+    );
+    if (_selectionDirty) {
+      return;
+    }
+    _selectionDirty = true;
+    setState(() {});
+  }
+
+  Rect _boundsThrough(Matrix4 matrix, Rect bounds) {
+    final corners = [
+      bounds.topLeft,
+      bounds.topRight,
+      bounds.bottomRight,
+      bounds.bottomLeft,
+    ];
+    var left = double.infinity;
+    var top = double.infinity;
+    var right = double.negativeInfinity;
+    var bottom = double.negativeInfinity;
+    for (final corner in corners) {
+      final next = _through(matrix, corner);
+      left = math.min(left, next.dx);
+      top = math.min(top, next.dy);
+      right = math.max(right, next.dx);
+      bottom = math.max(bottom, next.dy);
+    }
+    return Rect.fromLTRB(left, top, right, bottom);
+  }
+
+  Offset _through(Matrix4 matrix, Offset point) {
+    final m = matrix.storage;
+    return Offset(
+      m[0] * point.dx + m[4] * point.dy + m[12],
+      m[1] * point.dx + m[5] * point.dy + m[13],
+    );
+  }
+
+  void _finishSelectionGesture() {
+    final origins = _gestureStrokes;
+    final originTexts = _gestureTexts ?? const <TextBox>[];
+    final matrix = _gestureMatrix;
+    if (origins != null && matrix != null) {
+      _selectedStrokes = [
+        for (final stroke in origins)
+          mapStroke(stroke, (point) => _through(matrix, point)),
+      ];
+      _selectedTexts = [
+        for (final box in originTexts)
+          mapTextBox(box, (point) => _through(matrix, point)),
+      ];
+      _lassoOutline = [
+        for (final point in _gestureOutline ?? const <Offset>[])
+          _through(matrix, point),
+      ];
+      final source = _gestureBounds;
+      if (source != null) {
+        _selectionBounds = _boundsThrough(matrix, source);
+      }
+      final pageId = _selectionPageId;
+      final layerId = _selectionLayerId;
+      if (pageId != null && layerId != null) {
+        for (final box in _selectedTexts) {
+          _textDrafts[box.id] = (pageId: pageId, layerId: layerId, box: box);
+        }
+      }
+    }
+    _gestureEpoch++;
+    _gestureStrokes = null;
+    _gestureTexts = null;
+    _gestureCenter = null;
+    _gestureBounds = null;
+    _gestureMatrix = null;
+    _rotateOrigin = null;
+    _gestureOutline = null;
+    _rotateLast = null;
+    final shot = _gestureImage;
+    _gestureImage = null;
+    _gestureImageRect = null;
+    _selectionLive.value = null;
+    if (shot != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => shot.dispose());
+    }
+    if (!_selectionDirty || origins == null) {
+      _selectionDirty = false;
+      return;
+    }
+    _selectionDirty = false;
+    final pageId = _selectionPageId;
+    final layerId = _selectionLayerId;
+    if (pageId == null || layerId == null) {
+      return;
+    }
+    final moved = <({TextBox before, TextBox after})>[];
+    for (var index = 0; index < _selectedTexts.length; index++) {
+      final before = originTexts[index];
+      final after = _selectedTexts[index];
+      if (before.x != after.x ||
+          before.y != after.y ||
+          before.width != after.width ||
+          before.height != after.height) {
+        moved.add((before: before, after: after));
+      }
+    }
+    final strokesChanged = !_sameInk(origins, _selectedStrokes);
+    final baked = [
+      for (final stroke in _selectedStrokes) _cloneStroke(stroke, id: newId()),
+    ];
+    if (strokesChanged) {
+      setState(() {
+        _selectedStrokes = baked;
+        _selectionBounds = boundsOfObjects(strokes: baked, texts: _selectedTexts);
+      });
+    }
+    if (!strokesChanged && moved.isEmpty) {
+      return;
+    }
+    _commit(
+      _MarkEdit(
+        pageId: pageId,
+        layerId: layerId,
+        added: strokesChanged ? baked : const [],
+        tombstoned: strokesChanged ? [for (final stroke in origins) stroke.id] : const [],
+        movedTexts: moved,
+      ),
+    );
+  }
+
+  void _copySelection() {
+    NoteClipboard.put(
+      strokes: [for (final stroke in _selectedStrokes) _cloneStroke(stroke)],
+      texts: [for (final box in _selectedTexts) box],
+    );
+  }
+
+  void _deleteSelection() {
+    final pageId = _selectionPageId;
+    final layerId = _selectionLayerId;
+    final ids = [
+      for (final stroke in _selectedStrokes) stroke.id,
+      for (final box in _selectedTexts) box.id,
+    ];
+    setState(() {
+      for (final id in ids) {
+        _textDrafts.remove(id);
+      }
+      _clearSelection();
+    });
+    if (pageId == null || layerId == null || ids.isEmpty) {
+      return;
+    }
+    _commit(
+      _MarkEdit(
+        pageId: pageId,
+        layerId: layerId,
+        added: const [],
+        tombstoned: ids,
+      ),
+    );
+  }
+
+  void _cutSelection() {
+    _copySelection();
+    _deleteSelection();
+  }
+
+  void _paste({bool fromArc = false}) {
+    if (NoteClipboard.isEmpty) {
+      if (fromArc) {
+        _closeArc();
+      }
+      return;
+    }
+    final page = _note.pages.firstWhere((item) => item.id == _selectedPageId);
+    final layer = _drawingLayer(page);
+    if (layer == null) {
+      return;
+    }
+    final strokes = [
+      for (final stroke in NoteClipboard.strokes)
+        _cloneStroke(stroke, id: newId()),
+    ];
+    final texts = [
+      for (final box in NoteClipboard.texts)
+        TextBox(
+          id: newId(),
+          version: 1,
+          x: box.x,
+          y: box.y,
+          width: box.width,
+          height: box.height,
+          source: box.source,
+        ),
+    ];
+    setState(() {
+      _selectedPageId = page.id;
+      _selectionPageId = page.id;
+      _selectionLayerId = layer.id;
+      _selectedStrokes = strokes;
+      _selectedTexts = texts;
+      _selectionBounds = boundsOfObjects(strokes: strokes, texts: texts);
+      for (final box in texts) {
+        _textDrafts[box.id] = (pageId: page.id, layerId: layer.id, box: box);
+      }
+    });
+    _commit(
+      _MarkEdit(
+        pageId: page.id,
+        layerId: layer.id,
+        added: strokes,
+        tombstoned: const [],
+        createdTexts: texts,
+      ),
+    );
+    if (fromArc) {
+      _closeArc();
+    }
+  }
+
+  void _clearSelection() {
+    _selectionPageId = null;
+    _selectionLayerId = null;
+    _selectedStrokes = const [];
+    _selectedTexts = const [];
+    _selectionBounds = null;
+    _gestureStrokes = null;
+    _gestureTexts = null;
+    _gestureEpoch++;
+    _gestureCenter = null;
+    _gestureBounds = null;
+    _gestureMatrix = null;
+    _rotateOrigin = null;
+    _gestureOutline = null;
+    _lassoOutline = const [];
+    _selectionDirty = false;
+    _rotateLast = null;
+    final shot = _gestureImage;
+    _gestureImage = null;
+    _gestureImageRect = null;
+    _selectionLive.value = null;
+    if (shot != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => shot.dispose());
+    }
+  }
+
+  Future<void> _openSelectionMenu() async {
+    if (_selectionMenuOpen) {
+      Navigator.of(context).pop();
+      return;
+    }
+    _selectionMenuOpen = true;
+    final at = _tip ?? Offset(MediaQuery.sizeOf(context).width / 2, 160);
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    final action = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromRect(
+        Rect.fromLTWH(at.dx, at.dy, 0, 0),
+        Offset.zero & overlay.size,
+      ),
+      items: const [
+        PopupMenuItem(value: 'delete', child: Text('删除')),
+        PopupMenuItem(value: 'copy', child: Text('复制')),
+        PopupMenuItem(value: 'cut', child: Text('剪切')),
+        PopupMenuItem(value: 'flip-horizontal', child: Text('水平镜像')),
+        PopupMenuItem(value: 'flip-vertical', child: Text('垂直镜像')),
+      ],
+    );
+    _selectionMenuOpen = false;
+    if (!mounted || action == null) {
+      return;
+    }
+    switch (action) {
+      case 'delete':
+        _deleteSelection();
+      case 'copy':
+        _copySelection();
+      case 'cut':
+        _cutSelection();
+      case 'flip-horizontal':
+        _mirrorSelection(horizontal: true);
+      case 'flip-vertical':
+        _mirrorSelection(horizontal: false);
+    }
+  }
+
+  StrokeObject _cloneStroke(StrokeObject stroke, {String? id}) {
+    return StrokeObject(
+      id: id ?? stroke.id,
+      tool: stroke.tool,
+      color: stroke.color,
+      baseWidth: stroke.baseWidth,
+      points: [for (final point in stroke.points) point],
+      finalized: true,
+      dashCycle: stroke.dashCycle,
+      dashRatio: stroke.dashRatio,
+    );
+  }
+
+  bool _sameInk(List<StrokeObject> before, List<StrokeObject> after) {
+    if (before.length != after.length) {
+      return false;
+    }
+    for (var index = 0; index < before.length; index++) {
+      final left = before[index].points;
+      final right = after[index].points;
+      if (left.length != right.length) {
+        return false;
+      }
+      for (var point = 0; point < left.length; point++) {
+        if (left[point].x != right[point].x || left[point].y != right[point].y) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
   void _eraseStart(String pageId, Offset point) {
     _endMoving();
+    if (_selectionBounds != null) {
+      setState(_clearSelection);
+    }
     final page = _note.pages.firstWhere((item) => item.id == pageId);
     final layer = _drawingLayer(page);
     if (layer == null) {
@@ -663,7 +1278,7 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
       _locatorPageId = page.id;
       _locatorLayerId = layerId;
     }
-    final query = Rect.fromPoints(path.first, path.last).inflate(eraserRadius);
+    final query = Rect.fromPoints(path.first, path.last).inflate(_eraserRadius);
     final deleted = layer.single.deletedObjectIds.toSet();
     final byId = {
       for (final stroke in _fading.value.strokes) stroke.id: stroke,
@@ -686,7 +1301,7 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
       if (item.pageId != page.id || item.layerId != layerId) {
         continue;
       }
-      if (!_boundsOf(item.stroke).inflate(eraserRadius).overlaps(query)) {
+      if (!_boundsOf(item.stroke).inflate(_eraserRadius).overlaps(query)) {
         continue;
       }
       consider(item.stroke);
@@ -702,18 +1317,18 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
   void _punchEraser(String pageId, Offset from, Offset to) {
     _patches.value = InkPatch(
       pageId: pageId,
-      bounds: Rect.fromPoints(from, to).inflate(eraserRadius + 4),
+      bounds: Rect.fromPoints(from, to).inflate(_eraserRadius + 4),
       paint: (canvas) {
         final paint = Paint()
           ..blendMode = BlendMode.dstOut
           ..color = const Color(0xFFFFFFFF)
           ..strokeCap = StrokeCap.round
-          ..strokeWidth = (eraserRadius + 2) * 2
+          ..strokeWidth = (_eraserRadius + 2) * 2
           ..style = PaintingStyle.stroke;
         if (from == to) {
           canvas.drawCircle(
             from,
-            eraserRadius + 2,
+            _eraserRadius + 2,
             paint..style = PaintingStyle.fill,
           );
           return;
@@ -775,7 +1390,26 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
         stroke: stroke,
       ));
     }
+    for (final item in edit.movedTexts) {
+      _textDrafts[item.after.id] = (
+        pageId: edit.pageId,
+        layerId: edit.layerId,
+        box: item.after,
+      );
+      _persistText(edit.pageId, edit.layerId, item.after);
+    }
+    for (final box in edit.createdTexts) {
+      _textDrafts[box.id] = (
+        pageId: edit.pageId,
+        layerId: edit.layerId,
+        box: box,
+      );
+      _persistText(edit.pageId, edit.layerId, box);
+    }
     setState(() {});
+    if (edit.added.isEmpty && edit.tombstoned.isEmpty) {
+      return;
+    }
     _saveChain = _saveChain.then((_) async {
       final updated = await widget.vault.changeMarks(
         _note,
@@ -816,6 +1450,17 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
   }
 
   void _retint(_MarkEdit edit, {required bool undo}) {
+    for (final item in edit.movedTexts) {
+      final box = undo ? item.before : item.after;
+      setState(() {
+        _textDrafts[box.id] = (
+          pageId: edit.pageId,
+          layerId: edit.layerId,
+          box: box,
+        );
+      });
+      _persistText(edit.pageId, edit.layerId, box);
+    }
     if (edit.textBefore != null && edit.textAfter != null) {
       final box = undo ? edit.textBefore! : edit.textAfter!;
       setState(() {
@@ -826,14 +1471,36 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
         );
       });
       _persistText(edit.pageId, edit.layerId, box);
+      if (edit.added.isEmpty && edit.tombstoned.isEmpty && edit.createdTexts.isEmpty) {
+        return;
+      }
+    }
+    final created = [for (final box in edit.createdTexts) box.id];
+    if (undo) {
+      for (final id in created) {
+        _textDrafts.remove(id);
+      }
+    } else {
+      for (final box in edit.createdTexts) {
+        _textDrafts[box.id] = (
+          pageId: edit.pageId,
+          layerId: edit.layerId,
+          box: box,
+        );
+        _persistText(edit.pageId, edit.layerId, box);
+      }
+    }
+    final tombstone = [
+      ...undo ? [for (final stroke in edit.added) stroke.id] : edit.tombstoned,
+      if (undo) ...created,
+    ];
+    final restore = [
+      ...undo ? edit.tombstoned : [for (final stroke in edit.added) stroke.id],
+      if (!undo) ...created,
+    ];
+    if (tombstone.isEmpty && restore.isEmpty) {
       return;
     }
-    final tombstone = undo
-        ? [for (final stroke in edit.added) stroke.id]
-        : edit.tombstoned;
-    final restore = undo
-        ? edit.tombstoned
-        : [for (final stroke in edit.added) stroke.id];
     _hidden
       ..addAll(tombstone)
       ..removeAll(restore);
@@ -917,35 +1584,46 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
   }
 
   void _toggleArc(Offset? globalPosition) {
+    if (_selectionMenuOpen) {
+      Navigator.of(context).pop();
+      return;
+    }
     if (_tool == InkTool.text) {
       final pageId = _textHoverPageId;
       final local = _textHoverLocal;
-      if (pageId != null && local != null) {
-        final hit = _boxAt(pageId, local);
-        if (hit != null) {
-          _selectText(pageId, hit.id);
+      final hit = pageId == null || local == null
+          ? null
+          : _boxAt(pageId, local);
+      if (hit != null) {
+        if (_selectedTextId == hit.id) {
+          setState(() {
+            _selectedTextId = null;
+            _editingTextId = null;
+          });
+          return;
         }
-      }
-      return;
-    }
-    if (_presetArc != null) {
-      if (globalPosition != null) {
-        for (final target in _presetTargets) {
-          if (target.rect.inflate(8).contains(globalPosition)) {
-            target.onLong();
-            return;
-          }
-        }
-      }
-      _closePresetArc();
-      return;
-    }
-    if (_arc != null) {
-      if (globalPosition != null && _penButtonContains(globalPosition)) {
-        _openPresetArc();
+        _selectText(pageId!, hit.id);
         return;
       }
+      if (_selectedTextId != null) {
+        setState(() => _selectedTextId = null);
+        return;
+      }
+    }
+    if (_presetArc != null && globalPosition != null) {
+      for (final target in _presetTargets) {
+        if (target.rect.inflate(8).contains(globalPosition)) {
+          target.onLong();
+          return;
+        }
+      }
+    }
+    if (_arc != null) {
       _closeArc();
+      return;
+    }
+    if (_selectionBounds != null && _selectionPageId == _selectedPageId) {
+      _openSelectionMenu();
       return;
     }
     final media = MediaQuery.of(context);
@@ -964,29 +1642,35 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
             icon: Icons.edit,
             label: '钢笔',
             selected: _tool == InkTool.pen,
-            onPressed: () => _chooseTool(InkTool.pen),
-            onLongPress: _openPresetArc,
+            onPressed: () => _selectArcTool(InkTool.pen),
           ),
           ToolArcAction(
             id: 'arc-text',
             icon: Icons.text_fields,
             label: '文字',
             selected: _tool == InkTool.text,
-            onPressed: () => _chooseTool(InkTool.text),
+            onPressed: () => _selectArcTool(InkTool.text),
           ),
           ToolArcAction(
-            id: 'arc-object-eraser',
-            icon: Icons.highlight_off,
-            label: '对象橡皮',
-            selected: _tool == InkTool.objectEraser,
-            onPressed: () => _chooseTool(InkTool.objectEraser),
-          ),
-          ToolArcAction(
-            id: 'arc-region-eraser',
+            id: 'arc-eraser',
             icon: Icons.auto_fix_off,
-            label: '区域橡皮',
-            selected: _tool == InkTool.regionEraser,
-            onPressed: () => _chooseTool(InkTool.regionEraser),
+            label: '橡皮',
+            selected:
+                _tool == InkTool.objectEraser || _tool == InkTool.regionEraser,
+            onPressed: () => _selectArcTool(_eraserTool),
+          ),
+          ToolArcAction(
+            id: 'arc-lasso',
+            icon: Icons.gesture,
+            label: '套索',
+            selected: _tool == InkTool.lasso,
+            onPressed: () => _selectArcTool(InkTool.lasso),
+          ),
+          ToolArcAction(
+            id: 'arc-paste',
+            icon: Icons.content_paste,
+            label: '粘贴',
+            onPressed: () => _paste(fromArc: true),
           ),
           ToolArcAction(
             id: 'arc-undo',
@@ -1004,6 +1688,198 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
       ),
     );
     Overlay.of(context).insert(_arc!);
+    if (_hasNextToolbar) {
+      _openSecondary(_tool);
+    }
+  }
+
+  InkTool get _eraserTool => _eraserKind == EraserKind.region
+      ? InkTool.regionEraser
+      : InkTool.objectEraser;
+
+  bool get _hasNextToolbar {
+    return switch (_tool) {
+      InkTool.pen => _presetArc == null,
+      InkTool.objectEraser || InkTool.regionEraser || InkTool.lasso =>
+        _optionsArc == null,
+      _ => false,
+    };
+  }
+
+  void _selectArcTool(InkTool tool) {
+    if (_tool != tool) {
+      setState(() {
+        if (_tool == InkTool.lasso) {
+          _clearSelection();
+        }
+        _tool = tool;
+        if (tool == InkTool.objectEraser || tool == InkTool.regionEraser) {
+          _eraserKind = tool == InkTool.regionEraser
+              ? EraserKind.region
+              : EraserKind.stroke;
+        }
+        if (tool != InkTool.text) {
+          _editingTextId = null;
+          _selectedTextId = null;
+        }
+      });
+      _closeSecondary();
+      if (_hasNextToolbar) {
+        _openSecondary(tool);
+      }
+      _arc?.markNeedsBuild();
+      return;
+    }
+    if (_hasNextToolbar) {
+      _openSecondary(tool);
+    }
+    _arc?.markNeedsBuild();
+  }
+
+  void _openSecondary(InkTool tool) {
+    if (tool == InkTool.pen) {
+      _closeOptionsArc();
+      _openPresetArc();
+      return;
+    }
+    if (tool == InkTool.objectEraser ||
+        tool == InkTool.regionEraser ||
+        tool == InkTool.lasso) {
+      _closePresetArc();
+      _openOptionsArc();
+    }
+  }
+
+  void _onDoubleTap() {
+    if (_stylus.doubleTap != DoubleTapAction.eraser) {
+      return;
+    }
+    final eraser =
+        _tool == InkTool.objectEraser || _tool == InkTool.regionEraser;
+    if (eraser) {
+      _chooseTool(_toolBeforeEraser ?? InkTool.pen);
+      return;
+    }
+    _toolBeforeEraser = _tool;
+    _chooseTool(_eraserTool);
+  }
+
+  void _openOptionsArc() {
+    final raw = _arcCenter;
+    if (raw == null) {
+      return;
+    }
+    _closeOptionsArc();
+    final media = MediaQuery.of(context);
+    final center = ToolArc.placedCenter(raw, media.size, media.padding);
+    final eraser =
+        _tool == InkTool.objectEraser || _tool == InkTool.regionEraser;
+    _optionsArc = OverlayEntry(
+      builder: (context) => ChoiceArc(
+        key: ValueKey(eraser ? 'eraser-options' : 'lasso-options'),
+        center: center,
+        items: eraser ? _eraserArcItems() : _lassoArcItems(),
+      ),
+    );
+    Overlay.of(context).insert(_optionsArc!);
+  }
+
+  List<ChoiceArcItem> _eraserArcItems() {
+    const radii = [8.0, 14.0, 24.0, 40.0];
+    return [
+      ChoiceArcItem(
+        label: '笔画',
+        selected: _tool == InkTool.objectEraser,
+        onPressed: () => _setEraserKind(EraserKind.stroke),
+      ),
+      ChoiceArcItem(
+        label: '区域',
+        selected: _tool == InkTool.regionEraser,
+        onPressed: () => _setEraserKind(EraserKind.region),
+      ),
+      for (final radius in radii)
+        ChoiceArcItem(
+          label: radius.toStringAsFixed(0),
+          selected: (_eraserRadius - radius).abs() < 0.5,
+          onPressed: () {
+            setState(() => _eraserRadius = radius);
+            _optionsArc?.markNeedsBuild();
+          },
+        ),
+    ];
+  }
+
+  List<ChoiceArcItem> _lassoArcItems() {
+    return [
+      ChoiceArcItem(
+        label: '自由',
+        selected: _lassoShape == LassoShape.free,
+        onPressed: () => _setLassoShape(LassoShape.free),
+      ),
+      ChoiceArcItem(
+        label: '矩形',
+        selected: _lassoShape == LassoShape.rect,
+        onPressed: () => _setLassoShape(LassoShape.rect),
+      ),
+      ChoiceArcItem(
+        label: '笔画',
+        selected: _lassoTargets.contains(LassoTarget.stroke),
+        onPressed: () => _toggleLassoTarget(
+          LassoTarget.stroke,
+          !_lassoTargets.contains(LassoTarget.stroke),
+        ),
+      ),
+      ChoiceArcItem(
+        label: '文本',
+        selected: _lassoTargets.contains(LassoTarget.text),
+        onPressed: () => _toggleLassoTarget(
+          LassoTarget.text,
+          !_lassoTargets.contains(LassoTarget.text),
+        ),
+      ),
+      ChoiceArcItem(
+        label: '荧光笔',
+        selected: _lassoTargets.contains(LassoTarget.highlighter),
+        onPressed: () => _toggleLassoTarget(
+          LassoTarget.highlighter,
+          !_lassoTargets.contains(LassoTarget.highlighter),
+        ),
+      ),
+    ];
+  }
+
+  void _setEraserKind(EraserKind kind) {
+    setState(() {
+      _eraserKind = kind;
+      _tool = _eraserTool;
+    });
+    _optionsArc?.markNeedsBuild();
+  }
+
+  void _setLassoShape(LassoShape shape) {
+    setState(() => _lassoShape = shape);
+    _optionsArc?.markNeedsBuild();
+  }
+
+  void _toggleLassoTarget(LassoTarget target, bool on) {
+    setState(() {
+      if (on) {
+        _lassoTargets.add(target);
+      } else {
+        _lassoTargets.remove(target);
+      }
+    });
+    _optionsArc?.markNeedsBuild();
+  }
+
+  void _closeOptionsArc() {
+    _optionsArc?.remove();
+    _optionsArc = null;
+  }
+
+  void _closeSecondary() {
+    _closePresetArc();
+    _closeOptionsArc();
   }
 
   Future<void> _openSettings() {
@@ -1021,6 +1897,21 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
             _applyPen(palette);
             return Future.value();
           },
+          loadStylus: () {
+            final vault = widget.vault;
+            if (vault is Vault) {
+              return vault.readStylusPreferences();
+            }
+            return Future.value(_stylus);
+          },
+          saveStylus: (preferences) {
+            setState(() => _stylus = preferences);
+            final vault = widget.vault;
+            if (vault is Vault) {
+              return vault.writeStylusPreferences(preferences);
+            }
+            return Future.value();
+          },
         ),
       ),
     );
@@ -1034,15 +1925,22 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
     _chooseTool(InkTool.pen);
   }
 
-  bool _penButtonContains(Offset global) {
-    final center = _arcCenter;
-    if (center == null) {
-      return false;
+  void _eraserPressed() {
+    final eraser =
+        _tool == InkTool.objectEraser || _tool == InkTool.regionEraser;
+    if (eraser) {
+      setState(() => _eraserBarOpen = !_eraserBarOpen);
+      return;
     }
-    final media = MediaQuery.of(context);
-    final origin = ToolArc.placedCenter(center, media.size, media.padding);
-    final rect = ToolArc.buttonRect(origin: origin, index: 0, count: 6);
-    return rect.inflate(16).contains(global);
+    _chooseTool(_eraserTool);
+  }
+
+  void _lassoPressed() {
+    if (_tool == InkTool.lasso) {
+      setState(() => _lassoBarOpen = !_lassoBarOpen);
+      return;
+    }
+    _chooseTool(InkTool.lasso);
   }
 
   void _openPresetArc() {
@@ -1081,10 +1979,27 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
   }
 
   void _chooseTool(InkTool tool) {
+    final leavingEraser =
+        _tool == InkTool.objectEraser || _tool == InkTool.regionEraser;
+    final enteringEraser =
+        tool == InkTool.objectEraser || tool == InkTool.regionEraser;
+    if (!leavingEraser && enteringEraser) {
+      _toolBeforeEraser = _tool;
+    }
     _closeArc();
     setState(() {
+      if (_tool == InkTool.lasso && tool != InkTool.lasso) {
+        _clearSelection();
+      }
       _penBarOpen = false;
+      _eraserBarOpen = false;
+      _lassoBarOpen = false;
       _tool = tool;
+      if (tool == InkTool.objectEraser || tool == InkTool.regionEraser) {
+        _eraserKind = tool == InkTool.regionEraser
+            ? EraserKind.region
+            : EraserKind.stroke;
+      }
       if (tool != InkTool.text) {
         _editingTextId = null;
         _selectedTextId = null;
@@ -1446,7 +2361,7 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
   }
 
   void _closeArc() {
-    _closePresetArc();
+    _closeSecondary();
     _arc?.remove();
     _arc = null;
     _arcCenter = null;
@@ -1546,7 +2461,12 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
               settledStrokes: _settled,
               live: _live,
               tool: _tool,
-              hiddenIds: _hidden,
+              hiddenIds: {
+                ..._hidden,
+                if (_selectionDirty)
+                  for (final stroke in _gestureStrokes ?? const <StrokeObject>[])
+                    stroke.id,
+              },
               patches: _patches,
               fading: _fading,
               onSelectPage: (pageId) =>
@@ -1579,6 +2499,31 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
               onTip: (tip) => _tip = tip,
               viewScale: _tileScale,
               onScaleSettled: _settleScale,
+              eraserRadius: _eraserRadius,
+              penWidth: _pen.width,
+              selectionLive: _selectionLive,
+              onSelectionClear: () => setState(_clearSelection),
+              lassoPoints: _lassoPoints,
+              lassoOutline: _lassoOutline,
+              lassoRect: _lassoRect,
+              selectionHaptic: _stylus.selectionHaptic,
+              selectionBounds:
+                  _selectedStrokes.isEmpty && _selectedTexts.isEmpty
+                  ? null
+                  : (_selectedPageId == _selectionPageId
+                        ? _selectionBounds
+                        : null),
+              selectionInk: _selectionDirty ? _selectedStrokes : const [],
+              onLassoStart: _lassoStart,
+              onLassoMove: _lassoMove,
+              onLassoEnd: _lassoEnd,
+              onSelectionMove: _selectionMove,
+              onSelectionMoveEnd: _finishSelectionGesture,
+              onSelectionScale: _selectionScale,
+              onSelectionScaleEnd: _finishSelectionGesture,
+              onSelectionRotate: _selectionRotate,
+              onSelectionRotateEnd: _finishSelectionGesture,
+              onSelectionMenu: _openSelectionMenu,
             ),
           );
         },
@@ -1591,6 +2536,53 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
             children: [
               if (_tool == InkTool.pen && _penBarOpen)
                 PenPresetBar(palette: _pen, onChanged: _applyPen),
+              if ((_tool == InkTool.objectEraser ||
+                      _tool == InkTool.regionEraser) &&
+                  _eraserBarOpen)
+                EraserOptionsBar(
+                  region: _tool == InkTool.regionEraser,
+                  radius: _eraserRadius,
+                  onRegion: (region) {
+                    setState(() {
+                      _eraserKind = region
+                          ? EraserKind.region
+                          : EraserKind.stroke;
+                      _tool = _eraserTool;
+                    });
+                  },
+                  onRadius: (radius) => setState(() => _eraserRadius = radius),
+                ),
+              if (_tool == InkTool.lasso && _lassoBarOpen)
+                LassoOptionsBar(
+                  rect: _lassoShape == LassoShape.rect,
+                  strokes: _lassoTargets.contains(LassoTarget.stroke),
+                  texts: _lassoTargets.contains(LassoTarget.text),
+                  highlighters: _lassoTargets.contains(LassoTarget.highlighter),
+                  onRect: (rect) => setState(
+                    () => _lassoShape = rect ? LassoShape.rect : LassoShape.free,
+                  ),
+                  onStrokes: (on) => setState(() {
+                    if (on) {
+                      _lassoTargets.add(LassoTarget.stroke);
+                    } else {
+                      _lassoTargets.remove(LassoTarget.stroke);
+                    }
+                  }),
+                  onTexts: (on) => setState(() {
+                    if (on) {
+                      _lassoTargets.add(LassoTarget.text);
+                    } else {
+                      _lassoTargets.remove(LassoTarget.text);
+                    }
+                  }),
+                  onHighlighters: (on) => setState(() {
+                    if (on) {
+                      _lassoTargets.add(LassoTarget.highlighter);
+                    } else {
+                      _lassoTargets.remove(LassoTarget.highlighter);
+                    }
+                  }),
+                ),
               SingleChildScrollView(
             scrollDirection: Axis.horizontal,
             child: Row(
@@ -1612,20 +2604,22 @@ class _NotePageState extends State<NotePage> with TickerProviderStateMixin {
                   icon: const Icon(Icons.text_fields),
                 ),
                 IconButton(
-                  tooltip: '对象橡皮',
-                  onPressed: () => _chooseTool(InkTool.objectEraser),
-                  color: _tool == InkTool.objectEraser
-                      ? Theme.of(context).colorScheme.primary
-                      : null,
-                  icon: const Icon(Icons.highlight_off),
-                ),
-                IconButton(
-                  tooltip: '区域橡皮',
-                  onPressed: () => _chooseTool(InkTool.regionEraser),
-                  color: _tool == InkTool.regionEraser
+                  tooltip: '橡皮',
+                  onPressed: _eraserPressed,
+                  color:
+                      _tool == InkTool.objectEraser ||
+                          _tool == InkTool.regionEraser
                       ? Theme.of(context).colorScheme.primary
                       : null,
                   icon: const Icon(Icons.auto_fix_off),
+                ),
+                IconButton(
+                  tooltip: '套索',
+                  onPressed: _lassoPressed,
+                  color: _tool == InkTool.lasso
+                      ? Theme.of(context).colorScheme.primary
+                      : null,
+                  icon: const Icon(Icons.gesture),
                 ),
                 IconButton(
                   tooltip: '撤销',
@@ -1692,6 +2686,8 @@ class _MarkEdit {
     required this.tombstoned,
     this.textBefore,
     this.textAfter,
+    this.movedTexts = const [],
+    this.createdTexts = const [],
   });
 
   final String pageId;
@@ -1700,6 +2696,8 @@ class _MarkEdit {
   final List<String> tombstoned;
   final TextBox? textBefore;
   final TextBox? textAfter;
+  final List<({TextBox before, TextBox after})> movedTexts;
+  final List<TextBox> createdTexts;
 }
 
 class _PenSession {

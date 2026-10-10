@@ -3,6 +3,7 @@ import 'dart:io';
 
 import '../ids.dart';
 import '../ink/pen_palette.dart';
+import '../input/stylus_preferences.dart';
 import '../ink/stroke.dart';
 import '../ink/text_box.dart';
 import '../paper.dart';
@@ -91,6 +92,7 @@ class Vault implements NoteLibrary {
 
   static const deviceFileName = 'device.json';
   static const penFileName = 'pen.json';
+  static const stylusFileName = 'stylus.json';
   static const noteSuffix = '.yep';
 
   Future<PenPalette> readPenPalette() async {
@@ -103,6 +105,26 @@ class Vault implements NoteLibrary {
     } on FormatException {
       return PenPalette.initial();
     }
+  }
+
+  Future<StylusPreferences> readStylusPreferences() async {
+    final file = File('${root.path}/$stylusFileName');
+    if (!await file.exists()) {
+      return StylusPreferences.initial;
+    }
+    try {
+      return StylusPreferences.fromJson(jsonDecode(await file.readAsString()));
+    } on FormatException {
+      return StylusPreferences.initial;
+    }
+  }
+
+  Future<void> writeStylusPreferences(StylusPreferences preferences) async {
+    await root.create(recursive: true);
+    await writeAtomic(
+      File('${root.path}/$stylusFileName'),
+      encodeJson(preferences.toJson()),
+    );
   }
 
   Future<void> writePenPalette(PenPalette palette) async {

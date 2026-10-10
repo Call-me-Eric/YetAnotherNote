@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 
 import '../ink/pen_palette.dart';
 import '../input/finger.dart';
+import '../input/stylus_preferences.dart';
 import '../input/stylus_side_button.dart';
 import '../storage/note_document.dart';
 import '../storage/vault.dart';
@@ -54,8 +55,12 @@ class _LibraryPageState extends State<LibraryPage> {
   }
 
   void _onSideButton(Offset? position) {
+    if (_menuOpen) {
+      Navigator.of(context).pop();
+      return;
+    }
     final note = _hovered;
-    if (note == null || _menuOpen || !mounted) {
+    if (note == null || !mounted) {
       return;
     }
     _showMenu(note, position ?? _hoverPosition ?? Offset.zero);
@@ -247,6 +252,20 @@ class _LibraryPageState extends State<LibraryPage> {
                       final vault = widget.vault;
                       if (vault is Vault) {
                         return vault.writePenPalette(palette);
+                      }
+                      return Future.value();
+                    },
+                    loadStylus: () {
+                      final vault = widget.vault;
+                      if (vault is Vault) {
+                        return vault.readStylusPreferences();
+                      }
+                      return Future.value(StylusPreferences.initial);
+                    },
+                    saveStylus: (preferences) {
+                      final vault = widget.vault;
+                      if (vault is Vault) {
+                        return vault.writeStylusPreferences(preferences);
                       }
                       return Future.value();
                     },

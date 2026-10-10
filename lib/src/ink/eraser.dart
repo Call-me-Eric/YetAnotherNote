@@ -3,7 +3,15 @@ import 'dart:ui';
 import '../ids.dart';
 import 'stroke.dart';
 
-enum InkTool { pen, text, objectEraser, regionEraser }
+enum InkTool { pen, text, objectEraser, regionEraser, lasso }
+
+enum EraserKind { stroke, region }
+
+enum LassoShape { free, rect }
+
+/// What a lasso is allowed to select. Highlighter objects are not stored yet;
+/// the flag is the interface for when they exist.
+enum LassoTarget { stroke, text, highlighter }
 
 const eraserRadius = 14.0;
 
